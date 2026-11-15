@@ -1,0 +1,169 @@
+.inkwell-status-line {
+  margin: 8px 0 16px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+}
+
+.inkwell-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.inkwell-live {
+  cursor: pointer;
+}
+
+.inkwell-live.is-pending-pull {
+  color: var(--text-accent);
+  font-weight: 600;
+}
+
+.inkwell-vaults {
+  display: grid;
+  gap: 8px;
+}
+
+.inkwell-vault {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.inkwell-vault.is-selected {
+  border-color: var(--interactive-accent);
+}
+
+.inkwell-star {
+  color: var(--text-accent);
+  font-weight: 700;
+}
+
+.inkwell-account {
+  font-family: var(--font-monospace);
+  user-select: all;
+}
+
+.inkwell-name {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+}
+
+.inkwell-name input {
+  width: 100%;
+}
+
+.inkwell-check {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.inkwell-suffixes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-bottom: 8px;
+}
+
+.inkwell-conflict-modal {
+  width: min(860px, 92vw);
+}
+
+.inkwell-conflict-modal button:disabled {
+  opacity: 0.45;
+}
+
+.inkwell-both h3 {
+  margin-bottom: 4px;
+}
+
+.inkwell-conflict-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.inkwell-conflict-pre {
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 8px;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+}
+
+.inkwell-merge {
+  width: 100%;
+  min-height: 220px;
+  margin-top: 8px;
+  font-family: var(--font-monospace);
+}
+
+.inkwell-history-modal {
+  width: min(760px, 94vw);
+}
+
+.inkwell-history-modal button:disabled,
+.inkwell-history-modal input:disabled {
+  opacity: 0.45;
+}
+
+.inkwell-days {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.inkwell-day {
+  width: 100%;
+  text-align: left;
+  white-space: pre-wrap;
+}
+
+.inkwell-day-body {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 8px 12px;
+}
+
+.inkwell-version {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.inkwell-diff {
+  max-height: 60vh;
+  overflow: auto;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+}
+
+.inkwell-diff-add {
+  color: var(--text-success);
+  white-space: pre-wrap;
+}
+
+.inkwell-diff-del {
+  color: var(--text-error);
+  white-space: pre-wrap;
+}
+
+.inkwell-diff-eq {
+  color: var(--text-muted);
+  white-space: pre-wrap;
+}
+
+@media (max-width: 600px) {
+  .inkwell-conflict-columns {
+    grid-template-columns: 1fr;
+  }
+}
