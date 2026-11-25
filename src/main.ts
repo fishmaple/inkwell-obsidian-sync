@@ -42,6 +42,8 @@ export interface SyncSettings {
   serverKind: ServerKind;
   /** Saved address while the Business server is selected, so switching back restores it. */
   selfHostedHost: string;
+  /** Use the shared login file across vaults, and write this vault's login into it. */
+  sharedConfig: boolean;
   accountId: string;
   displayName: string;
   apiToken: string;
@@ -95,6 +97,7 @@ const DEFAULT_SETTINGS: SyncSettings = {
   host: "",
   serverKind: "",
   selfHostedHost: "",
+  sharedConfig: false,
   accountId: "",
   displayName: "",
   apiToken: "",
@@ -308,9 +311,10 @@ export default class InkwellPlugin extends Plugin {
       : null;
     this.settings.boundVaultId = typeof rest.boundVaultId === "string" ? rest.boundVaultId : "";
     this.settings.vaultBindings = normalizeBindings(rest.vaultBindings);
+    this.settings.sharedConfig = rest.sharedConfig === true;
     const shared = readSharedConfig();
     applySharedConfig(this.settings, shared.config, {
-      applyLogin: shouldAdoptSharedLogin({
+      applyLogin: this.settings.sharedConfig && shouldAdoptSharedLogin({
         hasLogin: vaultHasLogin(this.settings),
         skipSharedLogin: this.settings.skipSharedLogin,
         storedHadLoginField,
@@ -335,7 +339,7 @@ export default class InkwellPlugin extends Plugin {
   }
 
   async saveSettings(): Promise<void> {
-    writeSharedConfig(this.settings, "seed");
+    if (this.settings.sharedConfig) writeSharedConfig(this.settings, "replace");
     const { secretKey, apiToken, ...rest } = this.settings;
     await this.saveData({
       ...rest,

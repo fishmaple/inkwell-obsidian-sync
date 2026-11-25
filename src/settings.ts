@@ -6,7 +6,7 @@ import { BUSINESS_SERVER_HOST, OFFICIAL_WEBSITE, hostForServerKind, type ServerK
 import { t } from "./i18n";
 import { canSealSecrets } from "./local-secret";
 import { isDesktopApp } from "./obsidian-dir";
-import { readSharedConfig, sharedConfigProblem, sharedLoginKind } from "./shared-config";
+import { readSharedConfig, sharedConfigProblem, vaultHasLogin } from "./shared-config";
 import { promptBind } from "./bind-prompt";
 import { wipePlaintextHistory } from "./history";
 import { clampAutoVersionLimit } from "../shared/src/history";
@@ -103,7 +103,7 @@ export class InkwellSettingTab extends PluginSettingTab {
           .setName(t("pairingCode"))
           .setDesc(t("pairingCodeDesc"))
           .addText((text) => {
-            text.setPlaceholder("XXXX-XXXX-XXXX-XXXX");
+            text.setPlaceholder("HOME-7K2Q");
             text.setValue(this.pairingCode);
             text.inputEl.style.textTransform = "uppercase";
             text.inputEl.addEventListener("input", () => {
@@ -144,7 +144,7 @@ export class InkwellSettingTab extends PluginSettingTab {
       });
       void this.refreshProfile();
     }
-    this.renderSharedLogin(containerEl);
+    this.renderSharedConfig(containerEl);
 
     const encrypt = new Setting(containerEl)
       .setName(t("encrypt"))
@@ -223,6 +223,7 @@ export class InkwellSettingTab extends PluginSettingTab {
     });
 
     containerEl.createEl("h3", { text: t("syncSettings") });
+    containerEl.createEl("p", { text: t("syncSettingsDesc"), cls: "inkwell-status-line" });
 
     new Setting(containerEl)
       .setName(t("syncTypes"))
@@ -232,6 +233,9 @@ export class InkwellSettingTab extends PluginSettingTab {
           new SyncTypesModal(this.app, this.plugin, () => this.display()).open();
         });
       });
+    this.renderExcludeList(containerEl);
+
+    containerEl.createEl("h3", { text: t("syncBehavior") });
 
     const bound = hasActiveBinding(this.plugin.settings);
     const vaults = new Setting(containerEl)
@@ -324,7 +328,6 @@ export class InkwellSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         });
       });
-    this.renderExcludeList(containerEl);
     new Setting(containerEl)
       .setName(t("advancedSettings"))
       .setDesc(t("advancedSettingsDesc"))
@@ -366,45 +369,34 @@ export class InkwellSettingTab extends PluginSettingTab {
     super.hide();
   }
 
-  private renderSharedLogin(containerEl: HTMLElement): void {
+  private renderSharedConfig(containerEl: HTMLElement): void {
     const available = isDesktopApp() && !sharedConfigProblem();
     if (!available) return;
+    const enabled = this.plugin.settings.sharedConfig;
     const shared = readSharedConfig().config;
-    const kind = sharedLoginKind(this.plugin.settings, shared, true);
-    const account = shared?.displayName || shared?.accountId || "";
-    const desc = kind === "logged-out"
-      ? t("sharedLoginHold", { account })
-      : kind === "shared-empty"
-        ? t("sharedLoginEmpty")
-        : kind === "differs"
-          ? t("sharedLoginDiffers")
-          : kind === "matches"
-            ? t("sharedLoginMatch")
-            : t("sharedLoginScope");
-    const row = new Setting(containerEl).setName(t("sharedLogin")).setDesc(desc);
-    if (kind === "shared-empty" || kind === "differs" || kind === "matches") {
-      row.addButton((button) => {
-        button.setButtonText(t("sharedCopy"));
-        if (kind === "differs") button.setWarning();
-        button.onClick(() => {
-          const wrote = this.plugin.publishSharedLogin();
-          new Notice(wrote ? t("sharedCopied") : t("sharedCopyFailed"));
-          if (wrote) this.display();
-        });
-      });
-    } else if (kind === "logged-out") {
-      row.addButton((button) => {
-        button.setButtonText(t("sharedUse")).onClick(async () => {
-          if (!this.plugin.useSharedLogin()) {
-            new Notice(t("sharedUseFailed"));
-            return;
+    const name = shared?.displayName || shared?.accountId || "";
+    const state = enabled
+      ? (name ? t("sharedConfigOn", { name }) : t("sharedConfigOnEmpty"))
+      : t("sharedConfigOff");
+    new Setting(containerEl)
+      .setName(t("sharedConfig"))
+      .setDesc(`${t("sharedConfigDesc")}\n${state}`)
+      .addToggle((toggle) => {
+        toggle.setValue(enabled).onChange(async (value) => {
+          this.plugin.settings.sharedConfig = value;
+          let changed = false;
+          if (value) {
+            changed = vaultHasLogin(this.plugin.settings)
+              ? this.plugin.publishSharedLogin()
+              : this.plugin.useSharedLogin();
           }
           await this.plugin.saveSettings();
-          new Notice(t("sharedUsed"));
+          new Notice(value
+            ? (changed ? t("sharedConfigEnabled") : t("sharedConfigEnabledEmpty"))
+            : t("sharedConfigDisabled"));
           this.display();
         });
       });
-    }
   }
 
   private async refreshProfile(): Promise<void> {
@@ -503,6 +495,7 @@ export class InkwellSettingTab extends PluginSettingTab {
       const message = error instanceof Error ? error.message : "";
       if (/pairing code or key is incorrect/i.test(message)) new Notice(t("pairingInvalid"));
       else if (/too many/i.test(message)) new Notice(t("pairingTooMany"));
+      else if (/login key must be at least/i.test(message)) new Notice(t("loginKeyTooShort"));
       else new Notice(message || t("pairingFailed"));
     }
   }
