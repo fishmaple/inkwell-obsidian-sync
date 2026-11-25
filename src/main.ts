@@ -8,6 +8,7 @@ import { offerGitignore } from "./gitignore-prompt";
 import { t } from "./i18n";
 import { openLocal, sealLocal } from "./local-secret";
 import { applySharedConfig, readSharedConfig, shouldAdoptSharedLogin, vaultHasLogin, writeSharedConfig } from "./shared-config";
+import { resolveStoredServerChoice, type ServerKind } from "./server-mode";
 import { promptBind } from "./bind-prompt";
 import { hasActiveBinding } from "./binding";
 import { allSuffixes } from "./file-kinds";
@@ -37,6 +38,10 @@ export interface VaultBinding {
 
 export interface SyncSettings {
   host: string;
+  /** Which login path the user chose. Empty means no choice has been made yet. */
+  serverKind: ServerKind;
+  /** Saved address while the Business server is selected, so switching back restores it. */
+  selfHostedHost: string;
   accountId: string;
   displayName: string;
   apiToken: string;
@@ -88,6 +93,8 @@ export interface SyncSettings {
 
 const DEFAULT_SETTINGS: SyncSettings = {
   host: "",
+  serverKind: "",
+  selfHostedHost: "",
   accountId: "",
   displayName: "",
   apiToken: "",
@@ -309,11 +316,22 @@ export default class InkwellPlugin extends Plugin {
         storedHadLoginField,
       }),
     });
+    const beforeHost = this.settings.host;
+    const serverChoice = resolveStoredServerChoice({
+      host: this.settings.host,
+      serverKind: rest.serverKind,
+      selfHostedHost: this.settings.selfHostedHost,
+      hasLogin: Boolean(this.settings.apiToken.trim()),
+    });
+    this.settings.host = serverChoice.host;
+    this.settings.serverKind = serverChoice.serverKind;
+    this.settings.selfHostedHost = serverChoice.selfHostedHost;
+    const migratedHost = beforeHost !== this.settings.host;
     if (this.settings.boundVault && this.settings.accountId && !this.settings.boundAccountId) {
       this.settings.boundAccountId = this.settings.accountId;
     }
     if (!hasActiveBinding(this.settings)) this.settings.encryptNotes = false;
-    if (legacyPlain || shared.hadPlaintext) await this.saveSettings();
+    if (legacyPlain || shared.hadPlaintext || migratedHost) await this.saveSettings();
   }
 
   async saveSettings(): Promise<void> {

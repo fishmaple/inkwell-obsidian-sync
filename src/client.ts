@@ -14,9 +14,12 @@ import {
   type UrlListResponse,
   type VaultStat,
 } from "../shared/src/protocol";
+import { t } from "./i18n";
 
 export function resolveSyncHost(input: string): string {
-  return normalizeHost(input);
+  const trimmed = input.trim();
+  if (!trimmed) throw new Error(t("hostRequired"));
+  return normalizeHost(trimmed);
 }
 
 export interface ServerHealth {

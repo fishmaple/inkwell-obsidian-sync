@@ -1,7 +1,8 @@
 import { Modal, Notice, PluginSettingTab, Setting, type App } from "obsidian";
 import { bytesToBase64Url, randomBytes, randomSecret } from "../shared/src/codec";
-import { PUBLIC_SERVER_HOST, type VaultStat } from "../shared/src/protocol";
+import type { VaultStat } from "../shared/src/protocol";
 import { SyncClient, fetchBootstrap, fetchHealth, openExternal, resolveSyncHost } from "./client";
+import { BUSINESS_SERVER_HOST, hostForServerKind, type ServerKind } from "./server-mode";
 import { t } from "./i18n";
 import { canSealSecrets } from "./local-secret";
 import { isDesktopApp } from "./obsidian-dir";
@@ -37,70 +38,95 @@ export class InkwellSettingTab extends PluginSettingTab {
     if (!canSealSecrets()) containerEl.createEl("p", { text: t("secretsPlain"), cls: "inkwell-status-line" });
     if (sharedConfigProblem()) containerEl.createEl("p", { text: t("sharedMissing"), cls: "inkwell-status-line" });
 
-    const host = new Setting(containerEl)
-      .setName(t("host"))
-      .setDesc(t("hostDesc", { host: PUBLIC_SERVER_HOST }));
-    host.nameEl.createSpan({ text: " *", cls: "inkwell-star" });
-    host.addText((text) => {
-      text.setPlaceholder(PUBLIC_SERVER_HOST)
-        .setValue(this.plugin.settings.host)
-        .onChange(async (value) => {
-          this.plugin.settings.host = value.trim();
-          await this.plugin.saveSettings();
-        });
-      host.addButton((button) => {
-        button.setButtonText(t("resetHost")).onClick(async () => {
-          this.plugin.settings.host = "";
-          text.setValue("");
-          await this.plugin.saveSettings();
-        });
-      });
-    });
+    const loggedIn = Boolean(this.plugin.settings.apiToken.trim());
+    const kind = this.plugin.settings.serverKind;
 
     new Setting(containerEl)
-      .setName(t("accessToken"))
-      .setDesc(t("accessTokenDesc"))
-      .addText((text) => {
-        text.inputEl.type = "password";
-        text.setPlaceholder(t("accessToken"))
-          .setValue(this.plugin.settings.accessToken)
+      .setName(t("serverMode"))
+      .setDesc(t("serverModeDesc"))
+      .addDropdown((drop) => {
+        drop.addOption("", t("serverModeChoose"));
+        drop.addOption("business", t("serverModeBusiness"));
+        drop.addOption("self_hosted", t("serverModeSelfHosted"));
+        drop.setValue(kind);
+        drop.onChange(async (value) => {
+          const next = (value === "business" || value === "self_hosted" ? value : "") as ServerKind;
+          const previousHost = this.plugin.settings.host.trim();
+          if (next === "business" && previousHost) {
+            this.plugin.settings.selfHostedHost = previousHost;
+          }
+          const nextHost = next === "" ? "" : hostForServerKind(next, this.plugin.settings.selfHostedHost);
+          if (nextHost !== previousHost) this.clearLoginForHostChange();
+          this.plugin.settings.serverKind = next;
+          this.plugin.settings.host = nextHost;
+          await this.plugin.saveSettings();
+          this.display();
+        });
+      });
+
+    if (kind === "business") {
+      const business = new Setting(containerEl)
+        .setName(t("businessServer"))
+        .setDesc(t("businessServerDesc", { host: BUSINESS_SERVER_HOST }));
+      if (!loggedIn) {
+        business.addButton((button) => {
+          button.setButtonText(t("businessLogin")).setCta().onClick(() => {
+            void this.loginBusiness();
+          });
+        });
+      }
+    } else if (kind === "self_hosted") {
+      const host = new Setting(containerEl)
+        .setName(t("host"))
+        .setDesc(t("hostDesc"));
+      host.nameEl.createSpan({ text: " *", cls: "inkwell-star" });
+      host.addText((text) => {
+        text.setPlaceholder("https://sync.example.com")
+          .setValue(this.plugin.settings.host)
           .onChange(async (value) => {
-            this.plugin.settings.accessToken = value.trim();
+            this.plugin.settings.host = value.trim();
+            this.plugin.settings.selfHostedHost = this.plugin.settings.host;
             await this.plugin.saveSettings();
           });
       });
+    }
 
-    const loggedIn = Boolean(this.plugin.settings.apiToken.trim());
     const account = new Setting(containerEl).setName(t("account"));
     account.descEl.addClass("inkwell-account");
     if (!loggedIn) {
       account.setDesc(t("notLoggedIn"));
-      new Setting(containerEl).setName(t("loginId")).addText((text) => {
-        text.setValue(this.loginId).onChange((value) => { this.loginId = value.trim(); });
-      });
-      new Setting(containerEl).setName(t("loginPassword")).addText((text) => {
-        text.inputEl.type = "password";
-        text.setValue(this.loginPassword).onChange((value) => { this.loginPassword = value; });
-      });
-      account.addButton((button) => {
-        button.setButtonText(t("login")).setCta().onClick(() => {
-          void this.login();
+      if (kind === "self_hosted") {
+        new Setting(containerEl).setName(t("loginId")).addText((text) => {
+          text.setValue(this.loginId).onChange((value) => { this.loginId = value.trim(); });
         });
-      });
-      containerEl.createEl("p", { text: t("loginDesc"), cls: "inkwell-status-line" });
-      new Setting(containerEl)
-        .setName(t("pairingCode"))
-        .setDesc(t("pairingCodeDesc"))
-        .addText((text) => {
-          text.setPlaceholder("XXXX-XXXX")
-            .setValue(this.pairingCode)
-            .onChange((value) => { this.pairingCode = value.trim(); });
-        })
-        .addButton((button) => {
-          button.setButtonText(t("pairingLogin")).onClick(() => {
-            void this.redeemPairing();
+        new Setting(containerEl).setName(t("loginPassword")).addText((text) => {
+          text.inputEl.type = "password";
+          text.setValue(this.loginPassword).onChange((value) => { this.loginPassword = value; });
+        });
+        account.addButton((button) => {
+          button.setButtonText(t("login")).setCta().onClick(() => {
+            void this.login();
           });
         });
+        containerEl.createEl("p", { text: t("loginDesc"), cls: "inkwell-status-line" });
+        new Setting(containerEl)
+          .setName(t("pairingCode"))
+          .setDesc(t("pairingCodeDesc"))
+          .addText((text) => {
+            text.setPlaceholder("XXXX-XXXX")
+              .setValue(this.pairingCode)
+              .onChange((value) => { this.pairingCode = value.trim(); });
+          })
+          .addButton((button) => {
+            button.setButtonText(t("pairingLogin")).onClick(() => {
+              void this.redeemPairing();
+            });
+          });
+      } else if (kind === "business") {
+        containerEl.createEl("p", { text: t("businessLoginDesc"), cls: "inkwell-status-line" });
+      } else {
+        containerEl.createEl("p", { text: t("chooseServerFirst"), cls: "inkwell-status-line" });
+      }
     } else {
       account.setDesc("");
       account.descEl.createDiv({ text: t("accountNameLine", { name: this.plugin.settings.displayName || this.plugin.settings.accountId }) });
@@ -592,6 +618,10 @@ export class InkwellSettingTab extends PluginSettingTab {
   }
 
   private async redeemPairing(): Promise<void> {
+    if (!this.plugin.settings.host.trim()) {
+      new Notice(t("hostRequired"));
+      return;
+    }
     if (!this.pairingCode.trim()) {
       new Notice(t("pairingNeedCode"));
       return;
@@ -613,6 +643,10 @@ export class InkwellSettingTab extends PluginSettingTab {
   }
 
   private async login(): Promise<void> {
+    if (!this.plugin.settings.host.trim()) {
+      new Notice(t("hostRequired"));
+      return;
+    }
     try {
       const host = resolveSyncHost(this.plugin.settings.host);
       const boot = await fetchBootstrap(host, this.plugin.settings.accessToken, true);
@@ -642,6 +676,40 @@ export class InkwellSettingTab extends PluginSettingTab {
     } catch (error) {
       new Notice(error instanceof Error ? error.message : t("loginFailed"));
     }
+  }
+
+  private async loginBusiness(): Promise<void> {
+    const host = BUSINESS_SERVER_HOST;
+    try {
+      const health = await fetchHealth(host);
+      if (!health.oidc) {
+        new Notice(t("businessSsoUnavailable"));
+        return;
+      }
+    } catch {
+      new Notice(t("connectionFailed"));
+      return;
+    }
+    const state = bytesToBase64Url(randomBytes(24));
+    this.plugin.settings.host = host;
+    this.plugin.armLogin(host, state);
+    await this.plugin.saveSettings();
+    openExternal(`${host}/auth/oidc/start?return=obsidian&state=${encodeURIComponent(state)}`);
+    new Notice(t("loginBrowser"));
+  }
+
+  private clearLoginForHostChange(): void {
+    if (!this.plugin.settings.apiToken.trim()) return;
+    this.plugin.rememberBinding();
+    this.plugin.clearFileIndex();
+    this.plugin.settings.apiToken = "";
+    this.plugin.settings.accountId = "";
+    this.plugin.settings.displayName = "";
+    this.plugin.settings.boundAccountId = "";
+    this.plugin.settings.encryptNotes = false;
+    this.plugin.settings.skipSharedLogin = true;
+    this.plugin.refreshRibbon();
+    new Notice(t("serverChanged"));
   }
 
   private async testConnection(): Promise<void> {

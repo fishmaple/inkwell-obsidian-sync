@@ -7,7 +7,7 @@
     "dev": "node esbuild.config.mjs",
     "build": "node esbuild.config.mjs production",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test checkpoint-retry.test.ts sync-mode.test.ts shared-config.test.ts shared/src/crypto.test.ts shared/src/history.test.ts shared/src/patch.test.ts shared/src/merge.test.ts shared/src/reconcile.test.ts",
+    "test": "tsx --test checkpoint-retry.test.ts sync-mode.test.ts server-mode.test.ts shared-config.test.ts shared/src/crypto.test.ts shared/src/history.test.ts shared/src/patch.test.ts shared/src/merge.test.ts shared/src/reconcile.test.ts",
     "install-vault": "node scripts/install-plugin.mjs"
   },
   "devDependencies": {
