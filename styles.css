@@ -167,3 +167,23 @@
     grid-template-columns: 1fr;
   }
 }
+
+.inkwell-exclude-list {
+  margin: 6px 0 16px;
+}
+
+.inkwell-exclude-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 6px 0;
+}
+
+.inkwell-exclude-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.inkwell-exclude-row button {
+  flex: none;
+}

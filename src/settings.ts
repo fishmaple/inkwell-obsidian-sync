@@ -1,7 +1,7 @@
 import { Modal, Notice, PluginSettingTab, Setting, type App } from "obsidian";
-import { bytesToBase64Url, randomBytes, randomSecret } from "../shared/src/codec";
-import type { VaultStat } from "../shared/src/protocol";
-import { SyncClient, fetchBootstrap, fetchHealth, openExternal, resolveSyncHost } from "./client";
+import { randomSecret } from "../shared/src/codec";
+import { MIN_SECRET_LENGTH, type VaultStat } from "../shared/src/protocol";
+import { SyncClient, fetchHealth, openExternal, resolveSyncHost } from "./client";
 import { BUSINESS_SERVER_HOST, hostForServerKind, type ServerKind } from "./server-mode";
 import { t } from "./i18n";
 import { canSealSecrets } from "./local-secret";
@@ -20,11 +20,8 @@ import type InkwellPlugin from "./main";
 export class InkwellSettingTab extends PluginSettingTab {
   private keyInput: HTMLInputElement | null = null;
   private statusEl: HTMLElement | null = null;
-  private loginId = "";
-  private loginPassword = "";
+  private syncKey = "";
   private pairingCode = "";
-  private currentPassword = "";
-  private nextPassword = "";
 
   constructor(private readonly plugin: InkwellPlugin) {
     super(plugin.app, plugin);
@@ -96,19 +93,17 @@ export class InkwellSettingTab extends PluginSettingTab {
     if (!loggedIn) {
       account.setDesc(t("notLoggedIn"));
       if (kind === "self_hosted") {
-        new Setting(containerEl).setName(t("loginId")).addText((text) => {
-          text.setValue(this.loginId).onChange((value) => { this.loginId = value.trim(); });
-        });
-        new Setting(containerEl).setName(t("loginPassword")).addText((text) => {
+        const keySetting = new Setting(containerEl)
+          .setName(t("syncKey"))
+          .setDesc(t("syncKeyDesc"));
+        keySetting.nameEl.createSpan({ text: " *", cls: "inkwell-star" });
+        keySetting.addText((text) => {
           text.inputEl.type = "password";
-          text.setValue(this.loginPassword).onChange((value) => { this.loginPassword = value; });
+          text.setPlaceholder(t("syncKey"));
+          text.setValue(this.syncKey || this.plugin.settings.secretKey);
+          text.onChange((value) => { this.syncKey = value.trim(); });
         });
-        account.addButton((button) => {
-          button.setButtonText(t("login")).setCta().onClick(() => {
-            void this.login();
-          });
-        });
-        containerEl.createEl("p", { text: t("loginDesc"), cls: "inkwell-status-line" });
+        containerEl.createEl("p", { text: t("pairLoginDesc"), cls: "inkwell-status-line" });
         new Setting(containerEl)
           .setName(t("pairingCode"))
           .setDesc(t("pairingCodeDesc"))
@@ -134,15 +129,6 @@ export class InkwellSettingTab extends PluginSettingTab {
         button.setButtonText(t("logout")).onClick(() => {
           this.confirmLogout();
         });
-      });
-      new Setting(containerEl).setName(t("changePassword")).addText((text) => {
-        text.inputEl.type = "password";
-        text.setPlaceholder(t("currentPassword")).onChange((value) => { this.currentPassword = value; });
-      }).addText((text) => {
-        text.inputEl.type = "password";
-        text.setPlaceholder(t("nextPassword")).onChange((value) => { this.nextPassword = value; });
-      }).addButton((button) => {
-        button.setButtonText(t("changePassword")).onClick(() => { void this.changePassword(); });
       });
       void this.refreshProfile();
     }
@@ -357,89 +343,15 @@ export class InkwellSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         });
       });
+    this.renderExcludeList(containerEl);
     new Setting(containerEl)
-      .setName(t("maxFile"))
-      .setDesc(t("maxFileDesc"))
-      .addText((text) => {
-        text.setValue(String(Math.round(this.plugin.settings.maxFileBytes / (1024 * 1024))));
-        text.inputEl.addEventListener("change", () => {
-          const mb = Number(text.getValue());
-          this.plugin.settings.maxFileBytes = clampMaxFileBytes(Number.isFinite(mb) ? mb * 1024 * 1024 : this.plugin.settings.maxFileBytes);
-          text.setValue(String(Math.round(this.plugin.settings.maxFileBytes / (1024 * 1024))));
-          void this.plugin.saveSettings();
-        });
-      });
-    new Setting(containerEl)
-      .setName(t("excludePatterns"))
-      .setDesc(t("excludePatternsDesc"))
-      .addTextArea((text) => {
-        text.setValue((this.plugin.settings.excludePatterns ?? []).join("\n"));
-        text.onChange(async (value) => {
-          this.plugin.settings.excludePatterns = value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean).slice(0, 200);
-          await this.plugin.saveSettings();
-        });
-      });
-    this.numberSetting(containerEl, t("vaultMaxFiles"), t("vaultMaxFilesDesc"), this.plugin.settings.vaultMaxFiles, async (value) => {
-      this.plugin.settings.vaultMaxFiles = clampNonNegative(value, 0, 1_000_000);
-      await this.plugin.saveSettings();
-    });
-    this.numberSetting(containerEl, t("vaultMaxBytes"), t("vaultMaxBytesDesc"), Math.round(this.plugin.settings.vaultMaxBytes / (1024 * 1024)), async (value) => {
-      this.plugin.settings.vaultMaxBytes = clampNonNegative(Number(value) * 1024 * 1024, 0, 1024 * 1024 * 1024 * 1024);
-      await this.plugin.saveSettings();
-    });
-    this.numberSetting(containerEl, t("trashDays"), "", this.plugin.settings.trashDays, async (value) => {
-      this.plugin.settings.trashDays = clampTrashDays(value);
-      await this.plugin.saveSettings();
-    });
-    this.numberSetting(containerEl, t("trashFiles"), "", this.plugin.settings.trashMaxFiles, async (value) => {
-      this.plugin.settings.trashMaxFiles = clampNonNegative(value, 200, 100_000);
-      await this.plugin.saveSettings();
-    });
-    new Setting(containerEl).setName(t("trashTitle")).addButton((button) => {
-      button.setButtonText(t("trashOpen")).onClick(() => { new TrashModal(this.app, this.plugin).open(); });
-    });
-    new Setting(containerEl)
-      .setName(t("autoVersionLimit"))
-      .setDesc(t("autoVersionLimitDesc"))
-      .addText((text) => {
-        text.setPlaceholder("100")
-          .setValue(String(this.plugin.settings.autoVersionLimit));
-        const apply = async (value: string, snap: boolean) => {
-          const raw = Number(value.trim());
-          if (!Number.isFinite(raw) || !Number.isInteger(raw)) return;
-          if (!snap && (raw < 1 || raw > 256)) return;
-          const limit = clampAutoVersionLimit(raw);
-          if (snap && String(limit) !== value.trim()) {
-            text.setValue(String(limit));
-            new Notice(t("autoVersionLimitRange", { n: limit }));
-          }
-          if (limit === this.plugin.settings.autoVersionLimit) return;
-          this.plugin.settings.autoVersionLimit = limit;
-          await this.plugin.saveSettings();
-        };
-        text.onChange((value) => { void apply(value, false); });
-        text.inputEl.addEventListener("change", () => { void apply(text.getValue(), true); });
-      });
-
-    new Setting(containerEl)
-      .setName(t("openHistory"))
-      .setDesc(t("openHistoryDesc"))
+      .setName(t("advancedSettings"))
+      .setDesc(t("advancedSettingsDesc"))
       .addButton((button) => {
-        button.setButtonText(t("openHistory")).onClick(() => {
-          this.plugin.openFileHistory();
+        button.setButtonText(t("advancedSettings")).onClick(() => {
+          new AdvancedSettingsModal(this.app, this.plugin, () => this.display()).open();
         });
       });
-
-    if (this.plugin.settings.encryptNotes && this.plugin.settings.boundVaultId) {
-      new Setting(containerEl)
-        .setName(t("wipePlainHistory"))
-        .setDesc(t("wipePlainHistoryDesc"))
-        .addButton((button) => {
-          button.setButtonText(t("wipePlainHistory")).setWarning().onClick(() => {
-            wipePlaintextHistory(this.plugin);
-          });
-        });
-    }
 
     const actions = new Setting(containerEl)
       .setName(t("actions"))
@@ -586,40 +498,14 @@ export class InkwellSettingTab extends PluginSettingTab {
     }
   }
 
-  private numberSetting(
-    containerEl: HTMLElement,
-    name: string,
-    desc: string,
-    value: number,
-    save: (value: number) => Promise<void>,
-  ): void {
-    new Setting(containerEl).setName(name).setDesc(desc).addText((text) => {
-      text.setValue(String(value));
-      text.inputEl.addEventListener("change", () => {
-        const parsed = Number(text.getValue());
-        void save(Number.isFinite(parsed) ? parsed : value).then(() => {
-          text.setValue(text.getValue());
-        });
-      });
-    });
-  }
-
-  private async changePassword(): Promise<void> {
-    try {
-      const client = new SyncClient(resolveSyncHost(this.plugin.settings.host), this.plugin.settings.apiToken);
-      await client.changePassword(this.currentPassword, this.nextPassword);
-      this.currentPassword = "";
-      this.nextPassword = "";
-      new Notice(t("passwordChanged"));
-      this.display();
-    } catch (error) {
-      new Notice(error instanceof Error ? error.message : t("syncFailed"));
-    }
-  }
-
   private async redeemPairing(): Promise<void> {
     if (!this.plugin.settings.host.trim()) {
       new Notice(t("hostRequired"));
+      return;
+    }
+    const secret = (this.syncKey || this.plugin.settings.secretKey).trim();
+    if (secret.length < MIN_SECRET_LENGTH) {
+      new Notice(t("loginKeyRequired"));
       return;
     }
     if (!this.pairingCode.trim()) {
@@ -629,8 +515,10 @@ export class InkwellSettingTab extends PluginSettingTab {
     try {
       const host = resolveSyncHost(this.plugin.settings.host);
       const session = await new SyncClient(host, "").redeemPairing(this.pairingCode);
+      this.plugin.setSecret(secret);
       this.plugin.setLogin(session.accountId, session.apiToken, session.displayName ?? "");
       this.pairingCode = "";
+      this.syncKey = "";
       await this.plugin.saveSettings();
       await this.plugin.refreshBoundIdentity();
       await this.plugin.alignEncryptionWithRemote();
@@ -642,60 +530,8 @@ export class InkwellSettingTab extends PluginSettingTab {
     }
   }
 
-  private async login(): Promise<void> {
-    if (!this.plugin.settings.host.trim()) {
-      new Notice(t("hostRequired"));
-      return;
-    }
-    try {
-      const host = resolveSyncHost(this.plugin.settings.host);
-      const boot = await fetchBootstrap(host, this.plugin.settings.accessToken, true);
-      if (boot.mode === "single" && boot.accountId && boot.apiToken) {
-        this.plugin.setLogin(boot.accountId, boot.apiToken, boot.displayName ?? "");
-        await this.plugin.saveSettings();
-        await this.plugin.refreshBoundIdentity();
-        await this.plugin.alignEncryptionWithRemote();
-        new Notice(t("loggedIn"));
-        this.display();
-        if (!hasActiveBinding(this.plugin.settings)) promptBind(this.plugin);
-        return;
-      }
-      if (!this.loginId || !this.loginPassword) {
-        new Notice(t("loginNeedPassword"));
-        return;
-      }
-      const session = await new SyncClient(host, "").loginPassword(this.loginId, this.loginPassword);
-      this.plugin.setLogin(session.accountId, session.apiToken, session.displayName || this.loginId);
-      this.loginPassword = "";
-      await this.plugin.saveSettings();
-      await this.plugin.refreshBoundIdentity();
-      await this.plugin.alignEncryptionWithRemote();
-      new Notice(t("loggedIn"));
-      this.display();
-      if (!hasActiveBinding(this.plugin.settings)) promptBind(this.plugin);
-    } catch (error) {
-      new Notice(error instanceof Error ? error.message : t("loginFailed"));
-    }
-  }
-
   private async loginBusiness(): Promise<void> {
-    const host = BUSINESS_SERVER_HOST;
-    try {
-      const health = await fetchHealth(host);
-      if (!health.oidc) {
-        new Notice(t("businessSsoUnavailable"));
-        return;
-      }
-    } catch {
-      new Notice(t("connectionFailed"));
-      return;
-    }
-    const state = bytesToBase64Url(randomBytes(24));
-    this.plugin.settings.host = host;
-    this.plugin.armLogin(host, state);
-    await this.plugin.saveSettings();
-    openExternal(`${host}/auth/oidc/start?return=obsidian&state=${encodeURIComponent(state)}`);
-    new Notice(t("loginBrowser"));
+    new Notice(t("businessComingSoon"));
   }
 
   private clearLoginForHostChange(): void {
@@ -710,6 +546,61 @@ export class InkwellSettingTab extends PluginSettingTab {
     this.plugin.settings.skipSharedLogin = true;
     this.plugin.refreshRibbon();
     new Notice(t("serverChanged"));
+  }
+
+  private renderExcludeList(containerEl: HTMLElement): void {
+    new Setting(containerEl)
+      .setName(t("excludePatterns"))
+      .setDesc(t("excludePatternsDesc"));
+    const list = containerEl.createDiv({ cls: "inkwell-exclude-list" });
+    const save = async () => {
+      this.plugin.settings.excludePatterns = this.plugin.settings.excludePatterns
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .slice(0, 200);
+      await this.plugin.saveSettings();
+    };
+    const render = () => {
+      list.empty();
+      this.plugin.settings.excludePatterns.forEach((pattern, index) => {
+        const row = list.createDiv({ cls: "inkwell-exclude-row" });
+        const input = row.createEl("input", { type: "text" });
+        input.value = pattern;
+        input.onchange = () => {
+          const value = input.value.trim();
+          if (!value) this.plugin.settings.excludePatterns.splice(index, 1);
+          else this.plugin.settings.excludePatterns[index] = value;
+          void save().then(render);
+        };
+        const remove = row.createEl("button", { text: t("remove") });
+        remove.onclick = () => {
+          this.plugin.settings.excludePatterns.splice(index, 1);
+          void save().then(render);
+        };
+      });
+      if (this.plugin.settings.excludePatterns.length === 0) {
+        list.createEl("p", { text: t("excludeEmpty"), cls: "inkwell-status-line" });
+      }
+      const add = list.createDiv({ cls: "inkwell-exclude-row" });
+      const input = add.createEl("input", { type: "text" });
+      input.placeholder = t("excludeAddPlaceholder");
+      const commit = () => {
+        const value = input.value.trim();
+        if (!value) return;
+        if (!this.plugin.settings.excludePatterns.includes(value)) this.plugin.settings.excludePatterns.push(value);
+        input.value = "";
+        void save().then(render);
+      };
+      const button = add.createEl("button", { text: t("excludeAdd") });
+      button.onclick = commit;
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          commit();
+        }
+      });
+    };
+    render();
   }
 
   private async testConnection(): Promise<void> {
@@ -753,6 +644,116 @@ function confirmEncrypt(app: App): Promise<boolean> {
     const modal = new EncryptWarning(app, resolve);
     modal.open();
   });
+}
+
+function numberSetting(
+  containerEl: HTMLElement,
+  name: string,
+  desc: string,
+  value: number,
+  save: (value: number) => Promise<void>,
+): void {
+  new Setting(containerEl).setName(name).setDesc(desc).addText((text) => {
+    text.setValue(String(value));
+    text.inputEl.addEventListener("change", () => {
+      const parsed = Number(text.getValue());
+      void save(Number.isFinite(parsed) ? parsed : value).then(() => {
+        text.setValue(text.getValue());
+      });
+    });
+  });
+}
+
+class AdvancedSettingsModal extends Modal {
+  constructor(app: App, private readonly plugin: InkwellPlugin, private readonly done: () => void) {
+    super(app);
+  }
+
+  onOpen(): void {
+    this.titleEl.setText(t("advancedTitle"));
+    this.contentEl.createEl("p", { text: t("advancedSettingsDesc"), cls: "inkwell-status-line" });
+
+    new Setting(this.contentEl)
+      .setName(t("maxFile"))
+      .setDesc(t("maxFileDesc"))
+      .addText((text) => {
+        text.setValue(String(Math.round(this.plugin.settings.maxFileBytes / (1024 * 1024))));
+        text.inputEl.addEventListener("change", () => {
+          const mb = Number(text.getValue());
+          this.plugin.settings.maxFileBytes = clampMaxFileBytes(Number.isFinite(mb) ? mb * 1024 * 1024 : this.plugin.settings.maxFileBytes);
+          text.setValue(String(Math.round(this.plugin.settings.maxFileBytes / (1024 * 1024))));
+          void this.plugin.saveSettings();
+        });
+      });
+
+    numberSetting(this.contentEl, t("vaultMaxFiles"), t("vaultMaxFilesDesc"), this.plugin.settings.vaultMaxFiles, async (value) => {
+      this.plugin.settings.vaultMaxFiles = clampNonNegative(value, 0, 1_000_000);
+      await this.plugin.saveSettings();
+    });
+    numberSetting(this.contentEl, t("vaultMaxBytes"), t("vaultMaxBytesDesc"), Math.round(this.plugin.settings.vaultMaxBytes / (1024 * 1024)), async (value) => {
+      this.plugin.settings.vaultMaxBytes = clampNonNegative(Number(value) * 1024 * 1024, 0, 1024 * 1024 * 1024 * 1024);
+      await this.plugin.saveSettings();
+    });
+    numberSetting(this.contentEl, t("trashDays"), "", this.plugin.settings.trashDays, async (value) => {
+      this.plugin.settings.trashDays = clampTrashDays(value);
+      await this.plugin.saveSettings();
+    });
+    numberSetting(this.contentEl, t("trashFiles"), "", this.plugin.settings.trashMaxFiles, async (value) => {
+      this.plugin.settings.trashMaxFiles = clampNonNegative(value, 200, 100_000);
+      await this.plugin.saveSettings();
+    });
+    new Setting(this.contentEl).setName(t("trashTitle")).addButton((button) => {
+      button.setButtonText(t("trashOpen")).onClick(() => { new TrashModal(this.app, this.plugin).open(); });
+    });
+    new Setting(this.contentEl)
+      .setName(t("autoVersionLimit"))
+      .setDesc(t("autoVersionLimitDesc"))
+      .addText((text) => {
+        text.setPlaceholder("100");
+        text.setValue(String(this.plugin.settings.autoVersionLimit));
+        const apply = async (value: string, snap: boolean) => {
+          const raw = Number(value.trim());
+          if (!Number.isFinite(raw) || !Number.isInteger(raw)) return;
+          if (!snap && (raw < 1 || raw > 256)) return;
+          const limit = clampAutoVersionLimit(raw);
+          if (snap && String(limit) !== value.trim()) {
+            text.setValue(String(limit));
+            new Notice(t("autoVersionLimitRange", { n: limit }));
+          }
+          if (limit === this.plugin.settings.autoVersionLimit) return;
+          this.plugin.settings.autoVersionLimit = limit;
+          await this.plugin.saveSettings();
+        };
+        text.onChange((value) => { void apply(value, false); });
+        text.inputEl.addEventListener("change", () => { void apply(text.getValue(), true); });
+      });
+
+    new Setting(this.contentEl)
+      .setName(t("openHistory"))
+      .setDesc(t("openHistoryDesc"))
+      .addButton((button) => {
+        button.setButtonText(t("openHistory")).onClick(() => { this.plugin.openFileHistory(); });
+      });
+
+    if (this.plugin.settings.encryptNotes && this.plugin.settings.boundVaultId) {
+      new Setting(this.contentEl)
+        .setName(t("wipePlainHistory"))
+        .setDesc(t("wipePlainHistoryDesc"))
+        .addButton((button) => {
+          button.setButtonText(t("wipePlainHistory")).setWarning().onClick(() => {
+            wipePlaintextHistory(this.plugin);
+          });
+        });
+    }
+
+    const actions = this.contentEl.createDiv({ cls: "inkwell-actions" });
+    const close = actions.createEl("button", { text: t("close") });
+    close.onclick = () => this.close();
+  }
+
+  onClose(): void {
+    this.done();
+  }
 }
 
 class SyncTypesModal extends Modal {
