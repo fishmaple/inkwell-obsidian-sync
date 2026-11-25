@@ -2,7 +2,7 @@
   "name": "inkwell-sync",
   "description": "Inkwell Obsidian client.",
   "private": true,
-  "version": "0.3.10-beta",
+  "version": "0.4.0-beta",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "node esbuild.config.mjs production",
