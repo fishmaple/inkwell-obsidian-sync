@@ -231,8 +231,8 @@ export class SyncClient {
     return publicJson(this.host, "POST", "/api/v1/login", { loginId, password });
   }
 
-  redeemPairing(code: string): Promise<{ accountId: string; displayName: string; apiToken: string }> {
-    return publicJson(this.host, "POST", "/api/v1/pairing/redeem", { code });
+  redeemPairing(code: string, secret: string): Promise<{ accountId: string; displayName: string; apiToken: string }> {
+    return publicJson(this.host, "POST", "/api/v1/pairing/redeem", { code, secret });
   }
 
   changePassword(current: string, next: string): Promise<{ ok: boolean }> {

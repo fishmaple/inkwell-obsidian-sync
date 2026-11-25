@@ -1,6 +1,6 @@
 import { Modal, Notice, PluginSettingTab, Setting, type App } from "obsidian";
 import { randomSecret } from "../shared/src/codec";
-import { MIN_SECRET_LENGTH, type VaultStat } from "../shared/src/protocol";
+import type { VaultStat } from "../shared/src/protocol";
 import { SyncClient, fetchHealth, openExternal, resolveSyncHost } from "./client";
 import { BUSINESS_SERVER_HOST, OFFICIAL_WEBSITE, hostForServerKind, type ServerKind } from "./server-mode";
 import { t } from "./i18n";
@@ -20,7 +20,7 @@ import type InkwellPlugin from "./main";
 export class InkwellSettingTab extends PluginSettingTab {
   private keyInput: HTMLInputElement | null = null;
   private statusEl: HTMLElement | null = null;
-  private syncKey = "";
+  private loginKey = "";
   private pairingCode = "";
 
   constructor(private readonly plugin: InkwellPlugin) {
@@ -103,7 +103,7 @@ export class InkwellSettingTab extends PluginSettingTab {
           .setName(t("pairingCode"))
           .setDesc(t("pairingCodeDesc"))
           .addText((text) => {
-            text.setPlaceholder("XXXX-XXXX");
+            text.setPlaceholder("XXXX-XXXX-XXXX-XXXX");
             text.setValue(this.pairingCode);
             text.inputEl.style.textTransform = "uppercase";
             text.inputEl.addEventListener("input", () => {
@@ -119,8 +119,8 @@ export class InkwellSettingTab extends PluginSettingTab {
           .addText((text) => {
             text.inputEl.type = "password";
             text.setPlaceholder(t("syncKey"));
-            text.setValue(this.syncKey || this.plugin.settings.secretKey);
-            text.onChange((value) => { this.syncKey = value.trim(); });
+            text.setValue(this.loginKey);
+            text.onChange((value) => { this.loginKey = value.trim(); });
           })
           .addButton((button) => {
             button.setButtonText(t("pairingLogin")).onClick(() => {
@@ -478,8 +478,8 @@ export class InkwellSettingTab extends PluginSettingTab {
       new Notice(t("hostRequired"));
       return;
     }
-    const secret = (this.syncKey || this.plugin.settings.secretKey).trim();
-    if (secret.length < MIN_SECRET_LENGTH) {
+    const secret = this.loginKey.trim();
+    if (!secret) {
       new Notice(t("loginKeyRequired"));
       return;
     }
@@ -489,11 +489,10 @@ export class InkwellSettingTab extends PluginSettingTab {
     }
     try {
       const host = resolveSyncHost(this.plugin.settings.host);
-      const session = await new SyncClient(host, "").redeemPairing(this.pairingCode);
-      this.plugin.setSecret(secret);
+      const session = await new SyncClient(host, "").redeemPairing(this.pairingCode, secret);
       this.plugin.setLogin(session.accountId, session.apiToken, session.displayName ?? "");
       this.pairingCode = "";
-      this.syncKey = "";
+      this.loginKey = "";
       await this.plugin.saveSettings();
       await this.plugin.refreshBoundIdentity();
       await this.plugin.alignEncryptionWithRemote();
@@ -502,7 +501,7 @@ export class InkwellSettingTab extends PluginSettingTab {
       if (!hasActiveBinding(this.plugin.settings)) promptBind(this.plugin);
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
-      if (/invalid or expired/i.test(message)) new Notice(t("pairingInvalid"));
+      if (/pairing code or key is incorrect/i.test(message)) new Notice(t("pairingInvalid"));
       else if (/too many/i.test(message)) new Notice(t("pairingTooMany"));
       else new Notice(message || t("pairingFailed"));
     }
