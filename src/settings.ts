@@ -2,7 +2,7 @@ import { Modal, Notice, PluginSettingTab, Setting, type App } from "obsidian";
 import { randomSecret } from "../shared/src/codec";
 import { MIN_SECRET_LENGTH, type VaultStat } from "../shared/src/protocol";
 import { SyncClient, fetchHealth, openExternal, resolveSyncHost } from "./client";
-import { BUSINESS_SERVER_HOST, hostForServerKind, type ServerKind } from "./server-mode";
+import { BUSINESS_SERVER_HOST, OFFICIAL_WEBSITE, hostForServerKind, type ServerKind } from "./server-mode";
 import { t } from "./i18n";
 import { canSealSecrets } from "./local-secret";
 import { isDesktopApp } from "./obsidian-dir";
@@ -86,6 +86,12 @@ export class InkwellSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           });
       });
+      host.addButton((button) => {
+        button.setButtonText(t("checkServer")).onClick(() => { void this.checkServer(); });
+      });
+      host.addButton((button) => {
+        button.setButtonText(t("openInBrowser")).onClick(() => { this.openServerInBrowser(); });
+      });
     }
 
     const account = new Setting(containerEl).setName(t("account"));
@@ -93,30 +99,36 @@ export class InkwellSettingTab extends PluginSettingTab {
     if (!loggedIn) {
       account.setDesc(t("notLoggedIn"));
       if (kind === "self_hosted") {
-        const keySetting = new Setting(containerEl)
-          .setName(t("syncKey"))
-          .setDesc(t("syncKeyDesc"));
-        keySetting.nameEl.createSpan({ text: " *", cls: "inkwell-star" });
-        keySetting.addText((text) => {
-          text.inputEl.type = "password";
-          text.setPlaceholder(t("syncKey"));
-          text.setValue(this.syncKey || this.plugin.settings.secretKey);
-          text.onChange((value) => { this.syncKey = value.trim(); });
-        });
-        containerEl.createEl("p", { text: t("pairLoginDesc"), cls: "inkwell-status-line" });
         new Setting(containerEl)
           .setName(t("pairingCode"))
           .setDesc(t("pairingCodeDesc"))
           .addText((text) => {
-            text.setPlaceholder("XXXX-XXXX")
-              .setValue(this.pairingCode)
-              .onChange((value) => { this.pairingCode = value.trim(); });
+            text.setPlaceholder("XXXX-XXXX");
+            text.setValue(this.pairingCode);
+            text.inputEl.style.textTransform = "uppercase";
+            text.inputEl.addEventListener("input", () => {
+              const upper = text.inputEl.value.toUpperCase();
+              if (text.inputEl.value !== upper) text.inputEl.value = upper;
+              this.pairingCode = upper.trim();
+            });
+            text.onChange((value) => { this.pairingCode = value.trim().toUpperCase(); });
+          });
+        const keySetting = new Setting(containerEl)
+          .setName(t("syncKey"))
+          .setDesc(t("syncKeyDesc"))
+          .addText((text) => {
+            text.inputEl.type = "password";
+            text.setPlaceholder(t("syncKey"));
+            text.setValue(this.syncKey || this.plugin.settings.secretKey);
+            text.onChange((value) => { this.syncKey = value.trim(); });
           })
           .addButton((button) => {
             button.setButtonText(t("pairingLogin")).onClick(() => {
               void this.redeemPairing();
             });
           });
+        keySetting.nameEl.createSpan({ text: " *", cls: "inkwell-star" });
+        containerEl.createEl("p", { text: t("pairLoginDesc"), cls: "inkwell-status-line" });
       } else if (kind === "business") {
         containerEl.createEl("p", { text: t("businessLoginDesc"), cls: "inkwell-status-line" });
       } else {
@@ -133,15 +145,6 @@ export class InkwellSettingTab extends PluginSettingTab {
       void this.refreshProfile();
     }
     this.renderSharedLogin(containerEl);
-
-    new Setting(containerEl)
-      .setName(t("openSite"))
-      .setDesc(t("openSiteDesc"))
-      .addButton((button) => {
-        button.setButtonText(t("openSite")).onClick(() => {
-          void this.openSite();
-        });
-      });
 
     const encrypt = new Setting(containerEl)
       .setName(t("encrypt"))
@@ -218,6 +221,8 @@ export class InkwellSettingTab extends PluginSettingTab {
         }
       });
     });
+
+    containerEl.createEl("h3", { text: t("syncSettings") });
 
     new Setting(containerEl)
       .setName(t("syncTypes"))
@@ -306,30 +311,6 @@ export class InkwellSettingTab extends PluginSettingTab {
     };
 
     new Setting(containerEl)
-      .setName(t("transferParallel"))
-      .setDesc(t("transferParallelDesc"))
-      .addText((text) => {
-        text.setPlaceholder("10")
-          .setValue(String(this.plugin.settings.transferParallel));
-        const apply = async (value: string, snap: boolean) => {
-          const raw = Number(value.trim());
-          if (!Number.isFinite(raw) || !Number.isInteger(raw)) return;
-          if (!snap && (raw < 1 || raw > 20)) return;
-          const slots = clampTransferParallel(raw);
-          if (snap && String(slots) !== value.trim()) {
-            text.setValue(String(slots));
-            if (raw > 20) new Notice(t("transferParallelMax", { n: slots }));
-            else if (raw < 1) new Notice(t("transferParallelMin", { n: slots }));
-          }
-          if (slots === this.plugin.settings.transferParallel) return;
-          this.plugin.settings.transferParallel = slots;
-          await this.plugin.saveSettings();
-        };
-        text.onChange((value) => { void apply(value, false); });
-        text.inputEl.addEventListener("change", () => { void apply(text.getValue(), true); });
-      });
-
-    new Setting(containerEl)
       .setName(t("conflictPolicy"))
       .setDesc(t("conflictPolicyDesc"))
       .addDropdown((drop) => {
@@ -355,7 +336,6 @@ export class InkwellSettingTab extends PluginSettingTab {
 
     const actions = new Setting(containerEl)
       .setName(t("actions"))
-      .addButton((button) => button.setButtonText(t("test")).onClick(() => { void this.testConnection(); }))
       .addButton((button) => button.setButtonText(t("syncNow")).setCta().onClick(() => { void this.plugin.syncNow(true); }));
     if (this.plugin.settings.syncMode === "push_only") {
       actions.addButton((button) => button.setButtonText(t("pullRemote")).onClick(() => { void this.plugin.pullNow(true); }));
@@ -370,6 +350,13 @@ export class InkwellSettingTab extends PluginSettingTab {
     this.plugin.onAccountFilled = () => {
       this.display();
     };
+
+    new Setting(containerEl)
+      .setName(t("about"))
+      .setDesc(t("aboutDesc", { version: this.plugin.manifest.version }))
+      .addButton((button) => {
+        button.setButtonText(t("openWebsite")).onClick(() => openExternal(OFFICIAL_WEBSITE));
+      });
   }
 
   hide(): void {
@@ -486,18 +473,6 @@ export class InkwellSettingTab extends PluginSettingTab {
     }
   }
 
-  private async openSite(): Promise<void> {
-    try {
-      const host = resolveSyncHost(this.plugin.settings.host);
-      const token = this.plugin.settings.apiToken.trim();
-      if (!token) throw new Error(t("loginFirst"));
-      const { code } = await new SyncClient(host, token).webSession();
-      openExternal(`${host}/account/enter?code=${encodeURIComponent(code)}`);
-    } catch (error) {
-      new Notice(error instanceof Error ? error.message : t("cannotOpen"));
-    }
-  }
-
   private async redeemPairing(): Promise<void> {
     if (!this.plugin.settings.host.trim()) {
       new Notice(t("hostRequired"));
@@ -526,7 +501,10 @@ export class InkwellSettingTab extends PluginSettingTab {
       this.display();
       if (!hasActiveBinding(this.plugin.settings)) promptBind(this.plugin);
     } catch (error) {
-      new Notice(error instanceof Error ? error.message : t("pairingFailed"));
+      const message = error instanceof Error ? error.message : "";
+      if (/invalid or expired/i.test(message)) new Notice(t("pairingInvalid"));
+      else if (/too many/i.test(message)) new Notice(t("pairingTooMany"));
+      else new Notice(message || t("pairingFailed"));
     }
   }
 
@@ -603,27 +581,31 @@ export class InkwellSettingTab extends PluginSettingTab {
     render();
   }
 
-  private async testConnection(): Promise<void> {
+  private async checkServer(): Promise<void> {
+    if (!this.plugin.settings.host.trim()) {
+      new Notice(t("hostRequired"));
+      return;
+    }
+    const pending = new Notice(t("checkingServer"), 0);
     try {
-      const host = resolveSyncHost(this.plugin.settings.host);
-      const health = await fetchHealth(host);
+      const health = await fetchHealth(resolveSyncHost(this.plugin.settings.host));
+      pending.hide();
       const mode = health.oidc ? t("modeSso") : health.devLogin ? t("modeDev") : t("modeOk");
-      const token = this.plugin.settings.apiToken.trim();
-      if (!token) {
-        new Notice(t("reachable", { mode }));
-        return;
-      }
-      const listed = await new SyncClient(host, token).vaults();
-      const files = listed.vaults.reduce((sum, vault) => sum + vault.files, 0);
-      const names = listed.vaults.map((vault) => vault.name).join(", ") || t("none");
-      this.plugin.settings.lastSyncSummary = t("connected", { vaults: listed.vaults.length, files, names });
-      await this.plugin.saveSettings();
-      this.statusEl?.setText(this.plugin.settings.lastSyncSummary);
-      new Notice(this.plugin.settings.lastSyncSummary);
+      new Notice(t("serverReachable", { mode }));
     } catch (error) {
+      pending.hide();
       new Notice(error instanceof Error ? error.message : t("connectionFailed"));
     }
   }
+
+  private openServerInBrowser(): void {
+    try {
+      openExternal(resolveSyncHost(this.plugin.settings.host));
+    } catch (error) {
+      new Notice(error instanceof Error ? error.message : t("cannotOpen"));
+    }
+  }
+
 }
 
 function autoSyncText(plugin: InkwellPlugin): string {
@@ -705,6 +687,30 @@ class AdvancedSettingsModal extends Modal {
     new Setting(this.contentEl).setName(t("trashTitle")).addButton((button) => {
       button.setButtonText(t("trashOpen")).onClick(() => { new TrashModal(this.app, this.plugin).open(); });
     });
+    new Setting(this.contentEl)
+      .setName(t("transferParallel"))
+      .setDesc(t("transferParallelDesc"))
+      .addText((text) => {
+        text.setPlaceholder("10")
+          .setValue(String(this.plugin.settings.transferParallel));
+        const apply = async (value: string, snap: boolean) => {
+          const raw = Number(value.trim());
+          if (!Number.isFinite(raw) || !Number.isInteger(raw)) return;
+          if (!snap && (raw < 1 || raw > 20)) return;
+          const slots = clampTransferParallel(raw);
+          if (snap && String(slots) !== value.trim()) {
+            text.setValue(String(slots));
+            if (raw > 20) new Notice(t("transferParallelMax", { n: slots }));
+            else if (raw < 1) new Notice(t("transferParallelMin", { n: slots }));
+          }
+          if (slots === this.plugin.settings.transferParallel) return;
+          this.plugin.settings.transferParallel = slots;
+          await this.plugin.saveSettings();
+        };
+        text.onChange((value) => { void apply(value, false); });
+        text.inputEl.addEventListener("change", () => { void apply(text.getValue(), true); });
+      });
+
     new Setting(this.contentEl)
       .setName(t("autoVersionLimit"))
       .setDesc(t("autoVersionLimitDesc"))

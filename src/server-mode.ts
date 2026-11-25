@@ -1,5 +1,8 @@
 import { normalizeHost } from "../shared/src/protocol";
 
+/** Product website. */
+export const OFFICIAL_WEBSITE = "https://fishmaple.cn";
+
 /** Hosted Inkwell Business server. Change this constant if the business login domain moves. */
 export const BUSINESS_SERVER_HOST = "https://inkwell.fishmaple.cn";
 
