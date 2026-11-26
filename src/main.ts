@@ -45,6 +45,8 @@ export interface SyncSettings {
   /** Use the shared login file across vaults, and write this vault's login into it. */
   sharedConfig: boolean;
   accountId: string;
+  /** Pairing code shown as this vault's account identity. */
+  loginCode: string;
   displayName: string;
   apiToken: string;
   secretKey: string;
@@ -97,8 +99,9 @@ const DEFAULT_SETTINGS: SyncSettings = {
   host: "",
   serverKind: "business",
   selfHostedHost: "",
-  sharedConfig: false,
+  sharedConfig: true,
   accountId: "",
+  loginCode: "",
   displayName: "",
   apiToken: "",
   secretKey: "",
@@ -311,9 +314,10 @@ export default class InkwellPlugin extends Plugin {
       : null;
     this.settings.boundVaultId = typeof rest.boundVaultId === "string" ? rest.boundVaultId : "";
     this.settings.vaultBindings = normalizeBindings(rest.vaultBindings);
-    this.settings.sharedConfig = rest.sharedConfig === true;
+    this.settings.sharedConfig = rest.sharedConfig !== false;
     const shared = readSharedConfig();
     applySharedConfig(this.settings, shared.config, {
+      applyHost: this.settings.sharedConfig,
       applyLogin: this.settings.sharedConfig && shouldAdoptSharedLogin({
         hasLogin: vaultHasLogin(this.settings),
         skipSharedLogin: this.settings.skipSharedLogin,
@@ -392,13 +396,16 @@ export default class InkwellPlugin extends Plugin {
     this.refreshRibbon();
   }
 
-  setLogin(accountId: string, apiToken: string, displayName = ""): void {
+  setLogin(accountId: string, apiToken: string, displayName = "", loginCode = ""): void {
     this.settings.skipSharedLogin = !accountId.trim() && !apiToken.trim();
     const previous = this.settings.accountId;
     if (previous && previous !== accountId) this.rememberBinding(previous);
     this.settings.accountId = accountId;
     this.settings.apiToken = apiToken;
     this.settings.displayName = displayName || (accountId === previous ? this.settings.displayName : "");
+    if (!accountId.trim()) this.settings.loginCode = "";
+    else if (loginCode) this.settings.loginCode = loginCode;
+    else if (accountId !== previous) this.settings.loginCode = "";
     const saved = this.settings.vaultBindings[accountId];
     if (saved?.vaultId) {
       if (saved.vaultId !== this.settings.boundVaultId) this.clearFileIndex();
@@ -561,7 +568,6 @@ export default class InkwellPlugin extends Plugin {
 
   /** Write this vault's login over the shared file. Does nothing when logged out. */
   publishSharedLogin(): boolean {
-    if (!vaultHasLogin(this.settings)) return false;
     return writeSharedConfig(this.settings, "replace");
   }
 
@@ -570,10 +576,10 @@ export default class InkwellPlugin extends Plugin {
     if (vaultHasLogin(this.settings)) return false;
     const shared = readSharedConfig().config;
     if (!shared || !vaultHasLogin(shared)) return false;
-    if (!this.settings.host.trim() && shared.host?.trim()) this.settings.host = shared.host;
+    if (shared.host?.trim()) this.settings.host = shared.host;
     if (!this.settings.accessToken.trim() && shared.accessToken) this.settings.accessToken = shared.accessToken;
     if (!this.settings.secretKey && shared.secretKey) this.setSecret(shared.secretKey);
-    this.setLogin(shared.accountId ?? "", shared.apiToken ?? "", shared.displayName ?? "");
+    this.setLogin(shared.accountId ?? "", shared.apiToken ?? "", shared.displayName ?? "", shared.loginCode ?? "");
     return true;
   }
 
@@ -684,10 +690,8 @@ export default class InkwellPlugin extends Plugin {
         await this.saveSettings();
       }
       const message = error instanceof Error ? error.message : t("syncFailed");
-      this.settings.lastSyncSummary = message;
-      await this.saveSettings();
-      this.setStatus(message);
-      if (manual) new Notice(message);
+      this.setStatus(this.settings.lastSyncSummary || t("notSynced"), "settings");
+      new Notice(message, 8000);
       return false;
     } finally {
       this.syncing = false;

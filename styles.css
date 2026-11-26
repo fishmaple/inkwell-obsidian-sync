@@ -187,3 +187,31 @@
 .inkwell-exclude-row button {
   flex: none;
 }
+
+.inkwell-sync-title {
+  font-size: 17px;
+}
+
+.inkwell-sync-modal {
+  line-height: 1.45;
+}
+
+.inkwell-sync-modal h3 {
+  font-size: 14px;
+  margin: 14px 0 4px;
+}
+
+.inkwell-sync-modal p {
+  font-size: 13px;
+  line-height: 1.45;
+  margin: 4px 0;
+}
+
+.inkwell-sync-modal .setting-item-name {
+  font-size: 14px;
+}
+
+.inkwell-sync-modal .setting-item-description {
+  font-size: 12.5px;
+  line-height: 1.45;
+}

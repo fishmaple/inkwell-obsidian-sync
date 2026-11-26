@@ -37,6 +37,8 @@ export class InkwellSettingTab extends PluginSettingTab {
     const loggedIn = Boolean(this.plugin.settings.apiToken.trim());
     const kind = this.plugin.settings.serverKind;
 
+    this.renderSharedConfig(containerEl);
+
     const modeSetting = new Setting(containerEl).setName(t("serverMode"));
     if (kind === "self_hosted") {
       modeSetting.setDesc(t("serverModeOpenSourceDesc"));
@@ -104,46 +106,21 @@ export class InkwellSettingTab extends PluginSettingTab {
     account.descEl.addClass("inkwell-account");
     if (!loggedIn) {
       account.setDesc(t("notLoggedIn"));
-      if (kind === "self_hosted") {
-        new Setting(containerEl)
-          .setName(t("pairingCode"))
-          .setDesc(t("pairingCodeDesc"))
-          .addText((text) => {
-            text.setPlaceholder("HOME-7K2Q");
-            text.inputEl.maxLength = 40;
-            text.setValue(this.pairingCode);
-            text.inputEl.style.textTransform = "uppercase";
-            text.inputEl.addEventListener("input", () => {
-              const cleaned = text.inputEl.value.toUpperCase().replace(/[^A-Z0-9\u4e00-\u9fff-]/g, "");
-              if (text.inputEl.value !== cleaned) text.inputEl.value = cleaned;
-              this.pairingCode = cleaned.trim();
-            });
-            text.onChange((value) => { this.pairingCode = value.trim().toUpperCase(); });
-          });
-        const keySetting = new Setting(containerEl)
-          .setName(t("syncKey"))
-          .setDesc(t("syncKeyDesc"))
-          .addText((text) => {
-            text.inputEl.type = "password";
-            text.setPlaceholder(t("syncKey"));
-            text.setValue(this.loginKey);
-            text.onChange((value) => { this.loginKey = value.trim(); });
-          })
-          .addButton((button) => {
-            button.setButtonText(t("pairingLogin")).onClick(() => {
-              void this.redeemPairing();
-            });
-          });
-        keySetting.nameEl.createSpan({ text: " *", cls: "inkwell-star" });
-        containerEl.createEl("p", { text: t("pairLoginDesc"), cls: "inkwell-status-line" });
-      } else if (kind === "business") {
-        containerEl.createEl("p", { text: t("businessLoginDesc"), cls: "inkwell-status-line" });
-      } else {
-        containerEl.createEl("p", { text: t("chooseServerFirst"), cls: "inkwell-status-line" });
-      }
+      account.addButton((button) => {
+        button.setButtonText(t("login")).setCta().onClick(() => {
+          if (kind === "business") {
+            new Notice(t("businessComingSoon"));
+            return;
+          }
+          new LoginModal(this.app, this.plugin, () => this.display()).open();
+        });
+      });
     } else {
       account.setDesc("");
-      account.descEl.createDiv({ text: t("accountNameLine", { name: this.plugin.settings.displayName || this.plugin.settings.accountId }) });
+      const shown = this.plugin.settings.loginCode
+        || this.plugin.settings.displayName
+        || this.plugin.settings.accountId;
+      account.descEl.createDiv({ text: t("accountCodeLine", { code: shown }) });
       account.addButton((button) => {
         button.setButtonText(t("logout")).onClick(() => {
           this.confirmLogout();
@@ -151,7 +128,6 @@ export class InkwellSettingTab extends PluginSettingTab {
       });
       void this.refreshProfile();
     }
-    this.renderSharedConfig(containerEl);
 
     const encrypt = new Setting(containerEl)
       .setName(t("encrypt"))
@@ -436,6 +412,7 @@ export class InkwellSettingTab extends PluginSettingTab {
     this.plugin.settings.skipSharedLogin = true;
     this.plugin.settings.apiToken = "";
     this.plugin.settings.accountId = "";
+    this.plugin.settings.loginCode = "";
     this.plugin.settings.displayName = "";
     this.plugin.settings.encryptNotes = false;
     await this.plugin.saveSettings();
@@ -465,41 +442,6 @@ export class InkwellSettingTab extends PluginSettingTab {
       openExternal(`${host}/account/enter?code=${encodeURIComponent(code)}&vault=${encodeURIComponent(vaultId)}`);
     } catch (error) {
       new Notice(error instanceof Error ? error.message : t("cannotOpen"));
-    }
-  }
-
-  private async redeemPairing(): Promise<void> {
-    if (!this.plugin.settings.host.trim()) {
-      new Notice(t("hostRequired"));
-      return;
-    }
-    const secret = this.loginKey.trim();
-    if (!secret) {
-      new Notice(t("loginKeyRequired"));
-      return;
-    }
-    if (!this.pairingCode.trim()) {
-      new Notice(t("pairingNeedCode"));
-      return;
-    }
-    try {
-      const host = resolveSyncHost(this.plugin.settings.host);
-      const session = await new SyncClient(host, "").redeemPairing(this.pairingCode, secret);
-      this.plugin.setLogin(session.accountId, session.apiToken, session.displayName ?? "");
-      this.pairingCode = "";
-      this.loginKey = "";
-      await this.plugin.saveSettings();
-      await this.plugin.refreshBoundIdentity();
-      await this.plugin.alignEncryptionWithRemote();
-      new Notice(t("loggedIn"));
-      this.display();
-      if (!hasActiveBinding(this.plugin.settings)) promptBind(this.plugin);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "";
-      if (/pairing code or key is incorrect/i.test(message)) new Notice(t("pairingInvalid"));
-      else if (/too many/i.test(message)) new Notice(t("pairingTooMany"));
-      else if (/login key must be at least/i.test(message)) new Notice(t("loginKeyTooShort"));
-      else new Notice(message || t("pairingFailed"));
     }
   }
 
@@ -584,6 +526,79 @@ function numberSetting(
       });
     });
   });
+}
+
+class LoginModal extends Modal {
+  private code = "";
+  private key = "";
+
+  constructor(app: App, private readonly plugin: InkwellPlugin, private readonly done: () => void) {
+    super(app);
+  }
+
+  onOpen(): void {
+    this.titleEl.setText(t("login"));
+    this.contentEl.createEl("p", { text: t("pairingContactAdmin"), cls: "inkwell-status-line" });
+    new Setting(this.contentEl)
+      .setName(t("pairingCode"))
+      .addText((text) => {
+        text.setPlaceholder("HOME-7K2Q");
+        text.inputEl.maxLength = 40;
+        text.inputEl.style.textTransform = "uppercase";
+        text.inputEl.addEventListener("input", () => {
+          const cleaned = text.inputEl.value.toUpperCase().replace(/[^A-Z0-9\u4e00-\u9fff-]/g, "");
+          if (text.inputEl.value !== cleaned) text.inputEl.value = cleaned;
+          this.code = cleaned.trim();
+        });
+        text.onChange((value) => { this.code = value.trim().toUpperCase(); });
+      });
+    new Setting(this.contentEl)
+      .setName(t("syncKey"))
+      .setDesc(t("syncKeyDesc"))
+      .addText((text) => {
+        text.inputEl.type = "password";
+        text.setPlaceholder(t("syncKey"));
+        text.onChange((value) => { this.key = value.trim(); });
+      });
+    const actions = this.contentEl.createDiv({ cls: "inkwell-actions" });
+    const submit = actions.createEl("button", { text: t("pairingLogin"), cls: "mod-cta" });
+    submit.onclick = () => { void this.login(); };
+    const cancel = actions.createEl("button", { text: t("cancel") });
+    cancel.onclick = () => this.close();
+  }
+
+  private async login(): Promise<void> {
+    if (!this.plugin.settings.host.trim()) {
+      new Notice(t("hostRequired"));
+      return;
+    }
+    if (!this.code) {
+      new Notice(t("pairingNeedCode"));
+      return;
+    }
+    if (!this.key) {
+      new Notice(t("loginKeyRequired"));
+      return;
+    }
+    try {
+      const host = resolveSyncHost(this.plugin.settings.host);
+      const session = await new SyncClient(host, "").redeemPairing(this.code, this.key);
+      this.plugin.setLogin(session.accountId, session.apiToken, session.displayName ?? "", session.loginCode ?? this.code);
+      await this.plugin.saveSettings();
+      await this.plugin.refreshBoundIdentity();
+      await this.plugin.alignEncryptionWithRemote();
+      new Notice(t("loggedIn"));
+      this.close();
+      this.done();
+      if (!hasActiveBinding(this.plugin.settings)) promptBind(this.plugin);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (/pairing code or key is incorrect/i.test(message)) new Notice(t("pairingInvalid"));
+      else if (/too many/i.test(message)) new Notice(t("pairingTooMany"));
+      else if (/login key must be at least/i.test(message)) new Notice(t("loginKeyTooShort"));
+      else new Notice(message || t("pairingFailed"));
+    }
+  }
 }
 
 class AdvancedSettingsModal extends Modal {
@@ -720,6 +735,8 @@ class SyncSettingsModal extends Modal {
 
   onOpen(): void {
     this.titleEl.setText(t("syncSettings"));
+    this.titleEl.addClass("inkwell-sync-title");
+    this.contentEl.addClass("inkwell-sync-modal");
     this.contentEl.createEl("p", { text: t("syncSettingsDesc") });
     this.contentEl.createEl("h3", { text: t("syncTypes") });
     this.contentEl.createEl("p", { text: t("syncTypesDesc"), cls: "inkwell-status-line" });

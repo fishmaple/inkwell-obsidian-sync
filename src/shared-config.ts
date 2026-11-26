@@ -4,6 +4,7 @@ import { isDesktopApp, obsidianConfigDir, warnMissingObsidianConfig } from "./ob
 export interface SharedSyncConfig {
   host: string;
   accountId: string;
+  loginCode: string;
   displayName: string;
   apiToken: string;
   secretKey: string;
@@ -74,6 +75,7 @@ export function readSharedConfig(): { config: Partial<SharedSyncConfig> | null; 
     const config: Partial<SharedSyncConfig> = {};
     if (typeof parsed.host === "string") config.host = parsed.host;
     if (typeof parsed.accountId === "string") config.accountId = parsed.accountId;
+    if (typeof parsed.loginCode === "string") config.loginCode = parsed.loginCode;
     if (typeof parsed.displayName === "string") config.displayName = parsed.displayName;
     if (typeof parsed.accessToken === "string") config.accessToken = parsed.accessToken;
     const apiToken = openLocal(parsed.apiTokenBox) || (typeof parsed.apiToken === "string" ? parsed.apiToken : "");
@@ -98,7 +100,7 @@ export function mergeSharedConfig(
   mode: SharedWriteMode,
 ): SharedSyncConfig | null {
   if (mode === "replace") {
-    if (!vaultHasLogin(incoming)) return null;
+    if (!vaultHasLogin(incoming) && !incoming.host.trim()) return null;
     const next = copyShared(incoming);
     if (!next.host.trim() && existing?.host?.trim()) next.host = existing.host;
     return next;
@@ -107,6 +109,7 @@ export function mergeSharedConfig(
   if (vaultHasLogin(next) || !vaultHasLogin(incoming)) return null;
   if (!next.host.trim() && incoming.host.trim()) next.host = incoming.host;
   next.accountId = incoming.accountId;
+  next.loginCode = incoming.loginCode ?? "";
   next.displayName = incoming.displayName;
   next.apiToken = incoming.apiToken;
   next.secretKey = incoming.secretKey;
@@ -130,6 +133,7 @@ export function writeSharedConfig(config: SharedSyncConfig, mode: SharedWriteMod
   const body = {
     host: next.host,
     accountId: next.accountId,
+    loginCode: next.loginCode,
     displayName: next.displayName,
     accessToken: next.accessToken,
     apiTokenBox: sealLocal(next.apiToken) satisfies LocalBox,
@@ -156,15 +160,19 @@ export function writeSharedConfig(config: SharedSyncConfig, mode: SharedWriteMod
 export function applySharedConfig<T extends SharedSyncConfig>(
   settings: T,
   shared: Partial<SharedSyncConfig> | null,
-  options?: { applyLogin?: boolean },
+  options?: { applyLogin?: boolean; applyHost?: boolean },
 ): T {
   if (!shared) return settings;
+  if (options?.applyHost && typeof shared.host === "string" && shared.host.trim()) {
+    settings.host = shared.host;
+  }
   const applyLogin = options?.applyLogin ?? !vaultHasLogin(settings);
   if (!applyLogin || !vaultHasLogin(shared)) return settings;
   if (!settings.host.trim() && typeof shared.host === "string" && shared.host.trim()) {
     settings.host = shared.host;
   }
   if (typeof shared.accountId === "string") settings.accountId = shared.accountId;
+  if (typeof shared.loginCode === "string") settings.loginCode = shared.loginCode;
   if (typeof shared.displayName === "string") settings.displayName = shared.displayName;
   if (typeof shared.apiToken === "string") settings.apiToken = shared.apiToken;
   if (typeof shared.secretKey === "string") settings.secretKey = shared.secretKey;
@@ -176,6 +184,7 @@ function copyShared(config: Partial<SharedSyncConfig>): SharedSyncConfig {
   return {
     host: typeof config.host === "string" ? config.host : "",
     accountId: typeof config.accountId === "string" ? config.accountId : "",
+    loginCode: typeof config.loginCode === "string" ? config.loginCode : "",
     displayName: typeof config.displayName === "string" ? config.displayName : "",
     apiToken: typeof config.apiToken === "string" ? config.apiToken : "",
     secretKey: typeof config.secretKey === "string" ? config.secretKey : "",

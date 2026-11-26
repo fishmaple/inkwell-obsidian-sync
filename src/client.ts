@@ -74,7 +74,7 @@ export async function pollDevice(host: string, code: string): Promise<{ pending:
 
 export class SessionExpiredError extends Error {
   constructor() {
-    super("The login expired. Log in again.");
+    super(t("sessionExpired"));
     this.name = "SessionExpiredError";
   }
 }
@@ -231,7 +231,7 @@ export class SyncClient {
     return publicJson(this.host, "POST", "/api/v1/login", { loginId, password });
   }
 
-  redeemPairing(code: string, secret: string): Promise<{ accountId: string; displayName: string; apiToken: string }> {
+  redeemPairing(code: string, secret: string): Promise<{ accountId: string; displayName: string; apiToken: string; loginCode?: string }> {
     return publicJson(this.host, "POST", "/api/v1/pairing/redeem", { code, secret });
   }
 

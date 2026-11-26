@@ -13,6 +13,7 @@ function login(partial: Partial<SharedSyncConfig> = {}): SharedSyncConfig {
   return {
     host: "",
     accountId: "",
+    loginCode: "",
     displayName: "",
     apiToken: "",
     secretKey: "",
