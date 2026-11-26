@@ -455,6 +455,7 @@ export class InkwellSettingTab extends PluginSettingTab {
     this.plugin.clearFileIndex();
     this.plugin.settings.apiToken = "";
     this.plugin.settings.accountId = "";
+    this.plugin.settings.loginCode = "";
     this.plugin.settings.displayName = "";
     this.plugin.settings.boundAccountId = "";
     this.plugin.settings.encryptNotes = false;
