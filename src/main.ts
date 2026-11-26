@@ -95,7 +95,7 @@ export interface SyncSettings {
 
 const DEFAULT_SETTINGS: SyncSettings = {
   host: "",
-  serverKind: "",
+  serverKind: "business",
   selfHostedHost: "",
   sharedConfig: false,
   accountId: "",

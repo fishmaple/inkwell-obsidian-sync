@@ -2,7 +2,7 @@ import { Modal, Notice, PluginSettingTab, Setting, type App } from "obsidian";
 import { randomSecret } from "../shared/src/codec";
 import type { VaultStat } from "../shared/src/protocol";
 import { SyncClient, fetchHealth, openExternal, resolveSyncHost } from "./client";
-import { BUSINESS_SERVER_HOST, OFFICIAL_WEBSITE, hostForServerKind, type ServerKind } from "./server-mode";
+import { BUSINESS_SERVER_HOST, OFFICIAL_WEBSITE, OPEN_SOURCE_REPO, hostForServerKind, type ServerKind } from "./server-mode";
 import { t } from "./i18n";
 import { canSealSecrets } from "./local-secret";
 import { isDesktopApp } from "./obsidian-dir";
@@ -31,35 +31,41 @@ export class InkwellSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: t("title") });
-    containerEl.createEl("p", { text: t("intro"), cls: "inkwell-status-line" });
     if (!canSealSecrets()) containerEl.createEl("p", { text: t("secretsPlain"), cls: "inkwell-status-line" });
     if (sharedConfigProblem()) containerEl.createEl("p", { text: t("sharedMissing"), cls: "inkwell-status-line" });
 
     const loggedIn = Boolean(this.plugin.settings.apiToken.trim());
     const kind = this.plugin.settings.serverKind;
 
-    new Setting(containerEl)
-      .setName(t("serverMode"))
-      .setDesc(t("serverModeDesc"))
-      .addDropdown((drop) => {
-        drop.addOption("", t("serverModeChoose"));
-        drop.addOption("business", t("serverModeBusiness"));
-        drop.addOption("self_hosted", t("serverModeSelfHosted"));
-        drop.setValue(kind);
-        drop.onChange(async (value) => {
-          const next = (value === "business" || value === "self_hosted" ? value : "") as ServerKind;
-          const previousHost = this.plugin.settings.host.trim();
-          if (next === "business" && previousHost) {
-            this.plugin.settings.selfHostedHost = previousHost;
-          }
-          const nextHost = next === "" ? "" : hostForServerKind(next, this.plugin.settings.selfHostedHost);
-          if (nextHost !== previousHost) this.clearLoginForHostChange();
-          this.plugin.settings.serverKind = next;
-          this.plugin.settings.host = nextHost;
-          await this.plugin.saveSettings();
-          this.display();
-        });
+    const modeSetting = new Setting(containerEl).setName(t("serverMode"));
+    if (kind === "self_hosted") {
+      modeSetting.setDesc(t("serverModeOpenSourceDesc"));
+      const link = modeSetting.descEl.createEl("a", { text: t("githubLink"), href: OPEN_SOURCE_REPO });
+      link.onclick = (event) => {
+        event.preventDefault();
+        openExternal(OPEN_SOURCE_REPO);
+      };
+    } else {
+      modeSetting.setDesc(t("serverModeBusinessDesc"));
+    }
+    modeSetting.addDropdown((drop) => {
+      drop.addOption("business", t("serverModeBusiness"));
+      drop.addOption("self_hosted", t("serverModeSelfHosted"));
+      drop.setValue(kind === "self_hosted" ? "self_hosted" : "business");
+      drop.onChange(async (value) => {
+        const next: ServerKind = value === "self_hosted" ? "self_hosted" : "business";
+        const previousHost = this.plugin.settings.host.trim();
+        if (next === "business" && previousHost) {
+          this.plugin.settings.selfHostedHost = previousHost;
+        }
+        const nextHost = next === "business" ? BUSINESS_SERVER_HOST : hostForServerKind(next, this.plugin.settings.selfHostedHost);
+        if (nextHost !== previousHost) this.clearLoginForHostChange();
+        this.plugin.settings.serverKind = next;
+        this.plugin.settings.host = nextHost;
+        await this.plugin.saveSettings();
+        this.display();
       });
+    });
 
     if (kind === "business") {
       const business = new Setting(containerEl)
@@ -104,12 +110,13 @@ export class InkwellSettingTab extends PluginSettingTab {
           .setDesc(t("pairingCodeDesc"))
           .addText((text) => {
             text.setPlaceholder("HOME-7K2Q");
+            text.inputEl.maxLength = 40;
             text.setValue(this.pairingCode);
             text.inputEl.style.textTransform = "uppercase";
             text.inputEl.addEventListener("input", () => {
-              const upper = text.inputEl.value.toUpperCase();
-              if (text.inputEl.value !== upper) text.inputEl.value = upper;
-              this.pairingCode = upper.trim();
+              const cleaned = text.inputEl.value.toUpperCase().replace(/[^A-Z0-9\u4e00-\u9fff-]/g, "");
+              if (text.inputEl.value !== cleaned) text.inputEl.value = cleaned;
+              this.pairingCode = cleaned.trim();
             });
             text.onChange((value) => { this.pairingCode = value.trim().toUpperCase(); });
           });
@@ -222,18 +229,14 @@ export class InkwellSettingTab extends PluginSettingTab {
       });
     });
 
-    containerEl.createEl("h3", { text: t("syncSettings") });
-    containerEl.createEl("p", { text: t("syncSettingsDesc"), cls: "inkwell-status-line" });
-
     new Setting(containerEl)
-      .setName(t("syncTypes"))
-      .setDesc(t("syncTypesDesc"))
+      .setName(t("syncSettings"))
+      .setDesc(t("syncSettingsDesc"))
       .addButton((button) => {
-        button.setButtonText(t("syncTypes")).onClick(() => {
-          new SyncTypesModal(this.app, this.plugin, () => this.display()).open();
+        button.setButtonText(t("syncSettings")).onClick(() => {
+          new SyncSettingsModal(this.app, this.plugin, () => this.display()).open();
         });
       });
-    this.renderExcludeList(containerEl);
 
     containerEl.createEl("h3", { text: t("syncBehavior") });
 
@@ -518,61 +521,6 @@ export class InkwellSettingTab extends PluginSettingTab {
     new Notice(t("serverChanged"));
   }
 
-  private renderExcludeList(containerEl: HTMLElement): void {
-    new Setting(containerEl)
-      .setName(t("excludePatterns"))
-      .setDesc(t("excludePatternsDesc"));
-    const list = containerEl.createDiv({ cls: "inkwell-exclude-list" });
-    const save = async () => {
-      this.plugin.settings.excludePatterns = this.plugin.settings.excludePatterns
-        .map((item) => item.trim())
-        .filter(Boolean)
-        .slice(0, 200);
-      await this.plugin.saveSettings();
-    };
-    const render = () => {
-      list.empty();
-      this.plugin.settings.excludePatterns.forEach((pattern, index) => {
-        const row = list.createDiv({ cls: "inkwell-exclude-row" });
-        const input = row.createEl("input", { type: "text" });
-        input.value = pattern;
-        input.onchange = () => {
-          const value = input.value.trim();
-          if (!value) this.plugin.settings.excludePatterns.splice(index, 1);
-          else this.plugin.settings.excludePatterns[index] = value;
-          void save().then(render);
-        };
-        const remove = row.createEl("button", { text: t("remove") });
-        remove.onclick = () => {
-          this.plugin.settings.excludePatterns.splice(index, 1);
-          void save().then(render);
-        };
-      });
-      if (this.plugin.settings.excludePatterns.length === 0) {
-        list.createEl("p", { text: t("excludeEmpty"), cls: "inkwell-status-line" });
-      }
-      const add = list.createDiv({ cls: "inkwell-exclude-row" });
-      const input = add.createEl("input", { type: "text" });
-      input.placeholder = t("excludeAddPlaceholder");
-      const commit = () => {
-        const value = input.value.trim();
-        if (!value) return;
-        if (!this.plugin.settings.excludePatterns.includes(value)) this.plugin.settings.excludePatterns.push(value);
-        input.value = "";
-        void save().then(render);
-      };
-      const button = add.createEl("button", { text: t("excludeAdd") });
-      button.onclick = commit;
-      input.addEventListener("keydown", (event) => {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          commit();
-        }
-      });
-    };
-    render();
-  }
-
   private async checkServer(): Promise<void> {
     if (!this.plugin.settings.host.trim()) {
       new Notice(t("hostRequired"));
@@ -754,22 +702,27 @@ class AdvancedSettingsModal extends Modal {
   }
 }
 
-class SyncTypesModal extends Modal {
+class SyncSettingsModal extends Modal {
   private selected = new Set<string>();
   private includeOther = true;
   private custom: string[] = [];
   private customBox: HTMLElement | null = null;
+  private excludePatterns: string[] = [];
+  private excludeBox: HTMLElement | null = null;
 
   constructor(app: App, private readonly plugin: InkwellPlugin, private readonly done: () => void) {
     super(app);
     this.selected = new Set(plugin.settings.syncSuffixes);
     this.includeOther = plugin.settings.syncOther;
     this.custom = [...plugin.settings.customSuffixes];
+    this.excludePatterns = [...(plugin.settings.excludePatterns ?? [])];
   }
 
   onOpen(): void {
-    this.titleEl.setText(t("syncTypesTitle"));
-    this.contentEl.createEl("p", { text: t("syncTypesDesc") });
+    this.titleEl.setText(t("syncSettings"));
+    this.contentEl.createEl("p", { text: t("syncSettingsDesc") });
+    this.contentEl.createEl("h3", { text: t("syncTypes") });
+    this.contentEl.createEl("p", { text: t("syncTypesDesc"), cls: "inkwell-status-line" });
     const names = {
       image: t("groupImage"),
       video: t("groupVideo"),
@@ -815,6 +768,10 @@ class SyncTypesModal extends Modal {
       this.includeOther = otherInput.checked;
     };
     other.createSpan({ text: t("groupOtherDesc") });
+    this.contentEl.createEl("h3", { text: t("excludePatterns") });
+    this.contentEl.createEl("p", { text: t("excludePatternsDesc"), cls: "inkwell-status-line" });
+    this.excludeBox = this.contentEl.createDiv({ cls: "inkwell-exclude-list" });
+    this.renderExcludePatterns();
     const actions = this.contentEl.createDiv({ cls: "inkwell-actions" });
     const ok = actions.createEl("button", { text: t("save"), cls: "mod-cta" });
     ok.onclick = () => { void this.save(); };
@@ -847,10 +804,56 @@ class SyncTypesModal extends Modal {
     for (const suffix of this.custom) this.suffixCheck(this.customBox, suffix, true);
   }
 
+  private renderExcludePatterns(): void {
+    if (!this.excludeBox) return;
+    this.excludeBox.empty();
+    this.excludePatterns.forEach((pattern, index) => {
+      const row = this.excludeBox!.createDiv({ cls: "inkwell-exclude-row" });
+      const input = row.createEl("input", { type: "text" });
+      input.value = pattern;
+      input.onchange = () => {
+        const value = input.value.trim();
+        if (!value) this.excludePatterns.splice(index, 1);
+        else this.excludePatterns[index] = value;
+        this.renderExcludePatterns();
+      };
+      const remove = row.createEl("button", { text: t("remove") });
+      remove.onclick = () => {
+        this.excludePatterns.splice(index, 1);
+        this.renderExcludePatterns();
+      };
+    });
+    if (this.excludePatterns.length === 0) {
+      this.excludeBox.createEl("p", { text: t("excludeEmpty"), cls: "inkwell-status-line" });
+    }
+    const add = this.excludeBox.createDiv({ cls: "inkwell-exclude-row" });
+    const input = add.createEl("input", { type: "text" });
+    input.placeholder = t("excludeAddPlaceholder");
+    const commit = () => {
+      const value = input.value.trim();
+      if (!value) return;
+      if (!this.excludePatterns.includes(value)) this.excludePatterns.push(value);
+      input.value = "";
+      this.renderExcludePatterns();
+    };
+    const button = add.createEl("button", { text: t("excludeAdd") });
+    button.onclick = commit;
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        commit();
+      }
+    });
+  }
+
   private async save(): Promise<void> {
     this.plugin.settings.customSuffixes = [...this.custom];
     this.plugin.settings.syncSuffixes = [...this.selected];
     this.plugin.settings.syncOther = this.includeOther;
+    this.plugin.settings.excludePatterns = this.excludePatterns
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .slice(0, 200);
     this.plugin.settings.changeCursor = null;
     this.plugin.settings.pendingPullCount = 0;
     await this.plugin.saveSettings();

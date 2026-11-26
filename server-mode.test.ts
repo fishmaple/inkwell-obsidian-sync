@@ -31,7 +31,7 @@ test("logged-in installs keep the old default, new installs get no default", () 
 
 test("stored choices survive a reload and empty self-hosted hosts still render", () => {
   const fresh = resolveStoredServerChoice({ host: "", hasLogin: false });
-  assert.deepEqual(fresh, { host: "", serverKind: "", selfHostedHost: "" });
+  assert.deepEqual(fresh, { host: BUSINESS_SERVER_HOST, serverKind: "business", selfHostedHost: "" });
 
   const emptySelf = resolveStoredServerChoice({ host: "", serverKind: "self_hosted", hasLogin: false });
   assert.deepEqual(emptySelf, { host: "", serverKind: "self_hosted", selfHostedHost: "" });

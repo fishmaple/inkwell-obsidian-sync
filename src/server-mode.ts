@@ -3,6 +3,9 @@ import { normalizeHost } from "../shared/src/protocol";
 /** Product website. */
 export const OFFICIAL_WEBSITE = "https://fishmaple.cn";
 
+/** Open-source server repository linked from the settings page. */
+export const OPEN_SOURCE_REPO = "https://github.com/fishmaple/inkwell-sync-server";
+
 /** Hosted Inkwell Business server. Change this constant if the business login domain moves. */
 export const BUSINESS_SERVER_HOST = "https://inkwell.fishmaple.cn";
 
@@ -48,6 +51,7 @@ export function resolveStoredServerChoice(input: StoredServerChoice): {
     ? input.serverKind
     : kindFromHost;
   if (kindFromHost === "business") serverKind = "business";
+  if (!serverKind) serverKind = "business";
   const resolvedHost = serverKind === "business" ? BUSINESS_SERVER_HOST : host;
   const storedSelf = typeof input.selfHostedHost === "string" ? input.selfHostedHost.trim() : "";
   return {
