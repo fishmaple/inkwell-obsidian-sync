@@ -117,9 +117,7 @@ export class InkwellSettingTab extends PluginSettingTab {
       });
     } else {
       account.setDesc("");
-      const shown = this.plugin.settings.loginCode
-        || this.plugin.settings.displayName
-        || this.plugin.settings.accountId;
+      const shown = this.plugin.settings.loginCode || t("accountCodeMissing");
       account.descEl.createDiv({ text: t("accountCodeLine", { code: shown }) });
       account.addButton((button) => {
         button.setButtonText(t("logout")).onClick(() => {
