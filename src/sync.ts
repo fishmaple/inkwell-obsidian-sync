@@ -157,7 +157,7 @@ async function runVaultSync(plugin: InkwellPlugin, ready: ReadyClient, pass: Syn
       await plugin.app.vault.delete(file);
       delete index[fileId];
       removed++;
-      plugin.setStatus(t("syncProgress", { done: counts(), total }));
+      plugin.showProgress(t("syncProgress", { done: counts(), total }));
       continue;
     }
     if (action.type === "download") {
@@ -297,7 +297,7 @@ async function runVaultSync(plugin: InkwellPlugin, ready: ReadyClient, pass: Syn
       const saved = await pullRemote(plugin, ready, item.file, index, enqueue);
       if (saved) downloaded++;
       else if (item.countMiss) unchanged++;
-      plugin.setStatus(t("syncProgress", { done: counts(), total }));
+      plugin.showProgress(t("syncProgress", { done: counts(), total }));
     });
   }
   for (let i = 0; i < uploads.length; i++) {
@@ -308,7 +308,7 @@ async function runVaultSync(plugin: InkwellPlugin, ready: ReadyClient, pass: Syn
       if (outcome === "uploaded") uploaded++;
       else if (outcome === "deferred") pendingPull++;
       else uploadConflicts[i] = outcome;
-      plugin.setStatus(t("syncProgress", { done: counts(), total }));
+      plugin.showProgress(t("syncProgress", { done: counts(), total }));
     });
   }
   for (let i = 0; i < conflictJobs.length; i++) {
@@ -328,7 +328,7 @@ async function runVaultSync(plugin: InkwellPlugin, ready: ReadyClient, pass: Syn
   for (let i = 0; i < conflicts.length; i++) {
     const item = conflicts[i];
     if (!item) continue;
-    plugin.setStatus(t("conflictTitle", { index: i + 1, total: conflicts.length }));
+    plugin.showProgress(t("conflictTitle", { index: i + 1, total: conflicts.length }));
     const policy = conflictPolicyForPass(normalizeSyncMode(plugin.settings.syncMode), pass, plugin.settings.conflictPolicy || "snapshot");
     const choice = policy === "ask" ? await askConflict(plugin.app, conflictView(item, i + 1, conflicts.length)) : (autoChoice(policy, item) ?? await askConflict(plugin.app, conflictView(item, i + 1, conflicts.length)));
     const outcome = await applyConflict(plugin, ready, index, item, choice, device, encoding);

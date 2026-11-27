@@ -140,6 +140,8 @@ const DEFAULT_SETTINGS: SyncSettings = {
 export default class InkwellPlugin extends Plugin {
   settings: SyncSettings = structuredClone(DEFAULT_SETTINGS);
   onStatus?: (text: string) => void;
+  private progressNotice: Notice | null = null;
+  private progressAt = 0;
   private syncing = false;
   private pending = false;
   private pendingPull = false;
@@ -557,6 +559,24 @@ export default class InkwellPlugin extends Plugin {
    * `settings` updates the settings line and leaves the status bar alone, so a
    * finished summary cannot cover the pending-pull cue.
    */
+  showProgress(text: string): void {
+    const now = Date.now();
+    if (!this.progressNotice) {
+      this.progressNotice = new Notice(text, 0);
+      this.progressAt = now;
+      return;
+    }
+    if (now - this.progressAt < 100) return;
+    this.progressAt = now;
+    this.progressNotice.noticeEl.textContent = text;
+  }
+
+  hideProgress(): void {
+    this.progressNotice?.hide();
+    this.progressNotice = null;
+    this.progressAt = 0;
+  }
+
   setStatus(text: string, target: "all" | "settings" = "all"): void {
     if (target === "all") {
       const short = text.length > 80 ? `${text.slice(0, 80)}…` : text;
@@ -690,10 +710,23 @@ export default class InkwellPlugin extends Plugin {
         await this.saveSettings();
       }
       const message = error instanceof Error ? error.message : t("syncFailed");
+      if (/remote vault does not exist|vault does not exist/i.test(message)) {
+        const accountId = this.settings.accountId;
+        if (accountId) delete this.settings.vaultBindings[accountId];
+        this.clearBinding();
+        this.clearFileIndex();
+        await this.saveSettings();
+        this.refreshRibbon();
+        this.setStatus(t("notSynced"), "settings");
+        new Notice(t("remoteVaultMissing"), 10000);
+        if (manual) promptBind(this);
+        return false;
+      }
       this.setStatus(this.settings.lastSyncSummary || t("notSynced"), "settings");
       new Notice(message, 8000);
       return false;
     } finally {
+      this.hideProgress();
       this.syncing = false;
       this.refreshLiveStatus();
       this.followQueued();

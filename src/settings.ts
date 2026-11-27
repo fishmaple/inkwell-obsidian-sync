@@ -851,6 +851,9 @@ class SyncSettingsModal extends Modal {
 }
 
 class VaultManageModal extends Modal {
+  private vaults: VaultStat[] = [];
+  private deleting = new Set<string>();
+
   constructor(app: App, private readonly plugin: InkwellPlugin, private readonly done: () => void) {
     super(app);
   }
@@ -875,6 +878,7 @@ class VaultManageModal extends Modal {
   }
 
   private render(vaults: VaultStat[]): void {
+    this.vaults = vaults;
     this.contentEl.empty();
     if (vaults.length === 0) {
       this.contentEl.createEl("p", { text: t("manageVaultsEmpty") });
@@ -898,8 +902,11 @@ class VaultManageModal extends Modal {
           }).open();
         };
       }
-      const remove = actions.createEl("button", { text: t("deleteVault"), cls: "mod-warning" });
+      const busy = this.deleting.has(vault.id);
+      const remove = actions.createEl("button", { text: busy ? t("deletingVault") : t("deleteVault"), cls: "mod-warning" });
+      remove.disabled = busy;
       remove.onclick = () => {
+        if (this.deleting.has(vault.id)) return;
         new DeleteVaultConfirm(this.app, vault.name, (ok) => {
           if (ok) void this.remove(vault);
         }).open();
@@ -915,21 +922,35 @@ class VaultManageModal extends Modal {
   }
 
   private async remove(vault: VaultStat): Promise<void> {
+    if (this.deleting.has(vault.id)) return;
+    const wasCurrent = this.plugin.settings.boundVaultId === vault.id;
+    this.deleting.add(vault.id);
+    this.render(this.vaults);
     try {
       const token = this.plugin.settings.apiToken.trim();
       if (!token) throw new Error(t("needLogin"));
       await new SyncClient(resolveSyncHost(this.plugin.settings.host), token).deleteVault(vault.id);
-      if (this.plugin.settings.boundVaultId === vault.id) {
+      if (wasCurrent) {
         const accountId = this.plugin.settings.accountId;
         if (accountId) delete this.plugin.settings.vaultBindings[accountId];
         this.plugin.clearBinding();
+        this.plugin.clearFileIndex();
         await this.plugin.saveSettings();
+        this.plugin.refreshRibbon();
       }
       new Notice(t("deleteVaultDone", { name: vault.name }));
       this.done();
-      await this.load();
+      if (wasCurrent) {
+        this.close();
+        promptBind(this.plugin);
+      } else {
+        await this.load();
+      }
     } catch (error) {
       new Notice(error instanceof Error ? error.message : t("syncFailed"));
+    } finally {
+      this.deleting.delete(vault.id);
+      if (!wasCurrent && this.contentEl.isShown()) this.render(this.vaults);
     }
   }
 }
