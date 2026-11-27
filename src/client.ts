@@ -116,14 +116,17 @@ export class SyncClient {
     const content = JSON.stringify(payload.contentCipher);
     const bytes = new TextEncoder().encode(content).byteLength;
     const parentRev = payload.parentRev ?? null;
+    const perfStarted = Date.now();
     const listed = await this.urlList(payload.vaultId || payload.vault, {
       uploads: [{ fileId, parentRev, bytes, sha256: sha256Hex(content) }],
     });
+    const urlMs = Date.now() - perfStarted;
     const conflict = listed.conflicts.find((item) => item.fileId === fileId);
     if (conflict) throw new SyncConflictError(conflict.reason, conflictFile(conflict.file));
     const upload = listed.uploads.find((item) => item.fileId === fileId);
     if (!upload) throw new Error("The server did not return an upload URL");
     const sent = await transfer("PUT", upload.url, content, upload.headers);
+    const putMs = Date.now() - perfStarted - urlMs;
     if (sent.status >= 400) throw new Error(errorMessage(sent));
     const response = await send("POST", `${this.host}/api/v1/objects/${fileId}/commit`, {
       authorization: `Bearer ${this.token}`,
@@ -155,6 +158,10 @@ export class SyncClient {
       throw new SyncConflictError(body.reason, conflictFile(body.file));
     }
     if (response.status >= 400) throw new Error(errorMessage(response));
+    const totalMs = Date.now() - perfStarted;
+    if (totalMs >= 2000) {
+      console.log(`[inkwell][perf] slow upload file=${fileId.slice(0, 12)} bytes=${bytes} url=${urlMs}ms put=${putMs}ms commit=${totalMs - urlMs - putMs}ms total=${totalMs}ms`);
+    }
     return {
       ok: true,
       rev: typeof body?.rev === "number" ? body.rev : 0,
