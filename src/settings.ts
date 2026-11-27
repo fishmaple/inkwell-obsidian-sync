@@ -257,40 +257,6 @@ export class InkwellSettingTab extends PluginSettingTab {
         });
       });
 
-    const autoSync = new Setting(containerEl)
-      .setName(t("autoSync"))
-      .setDesc(autoSyncText(this.plugin))
-      .addToggle((toggle) => {
-        toggle.setValue(this.plugin.settings.autoSync).onChange(async (value) => {
-          this.plugin.settings.autoSync = value;
-          await this.plugin.saveSettings();
-          this.plugin.reschedule();
-        });
-      })
-      .addText((text) => {
-        text.setPlaceholder("30")
-          .setValue(String(this.plugin.settings.autoSyncSeconds));
-        const apply = async (value: string, snap: boolean) => {
-          const raw = Number(value.trim());
-          if (!Number.isFinite(raw) || !Number.isInteger(raw)) return;
-          if (!snap && (raw < 30 || raw > 86400)) return;
-          const seconds = Math.min(86400, Math.max(30, Math.floor(raw)));
-          if (snap && String(seconds) !== value.trim()) {
-            text.setValue(String(seconds));
-            if (raw < 30) new Notice(t("autoSyncMin", { n: seconds }));
-          }
-          if (seconds === this.plugin.settings.autoSyncSeconds) return;
-          this.plugin.settings.autoSyncSeconds = seconds;
-          await this.plugin.saveSettings();
-          this.plugin.reschedule();
-        };
-        text.onChange((value) => { void apply(value, false); });
-        text.inputEl.addEventListener("change", () => { void apply(text.getValue(), true); });
-      });
-    this.plugin.onSyncMeta = () => {
-      autoSync.setDesc(autoSyncText(this.plugin));
-    };
-
     new Setting(containerEl)
       .setName(t("conflictPolicy"))
       .setDesc(t("conflictPolicyDesc"))
@@ -601,92 +567,78 @@ class LoginModal extends Modal {
 }
 
 class AdvancedSettingsModal extends Modal {
+  private draft: {
+    maxFileMb: number;
+    vaultMaxFiles: number;
+    vaultMaxBytesMb: number;
+    trashDays: number;
+    trashMaxFiles: number;
+    autoSync: boolean;
+    autoSyncSeconds: number;
+    transferParallel: number;
+    autoVersionLimit: number;
+  };
+
   constructor(app: App, private readonly plugin: InkwellPlugin, private readonly done: () => void) {
     super(app);
+    const settings = plugin.settings;
+    this.draft = {
+      maxFileMb: Math.round(settings.maxFileBytes / (1024 * 1024)),
+      vaultMaxFiles: settings.vaultMaxFiles,
+      vaultMaxBytesMb: Math.round(settings.vaultMaxBytes / (1024 * 1024)),
+      trashDays: settings.trashDays,
+      trashMaxFiles: settings.trashMaxFiles,
+      autoSync: settings.autoSync,
+      autoSyncSeconds: settings.autoSyncSeconds,
+      transferParallel: settings.transferParallel,
+      autoVersionLimit: settings.autoVersionLimit,
+    };
   }
 
   onOpen(): void {
     this.titleEl.setText(t("advancedTitle"));
     this.contentEl.createEl("p", { text: t("advancedSettingsDesc"), cls: "inkwell-status-line" });
 
-    new Setting(this.contentEl)
-      .setName(t("maxFile"))
-      .setDesc(t("maxFileDesc"))
-      .addText((text) => {
-        text.setValue(String(Math.round(this.plugin.settings.maxFileBytes / (1024 * 1024))));
-        text.inputEl.addEventListener("change", () => {
-          const mb = Number(text.getValue());
-          this.plugin.settings.maxFileBytes = clampMaxFileBytes(Number.isFinite(mb) ? mb * 1024 * 1024 : this.plugin.settings.maxFileBytes);
-          text.setValue(String(Math.round(this.plugin.settings.maxFileBytes / (1024 * 1024))));
-          void this.plugin.saveSettings();
-        });
-      });
-
-    numberSetting(this.contentEl, t("vaultMaxFiles"), t("vaultMaxFilesDesc"), this.plugin.settings.vaultMaxFiles, async (value) => {
-      this.plugin.settings.vaultMaxFiles = clampNonNegative(value, 0, 1_000_000);
-      await this.plugin.saveSettings();
+    numberSetting(this.contentEl, t("maxFile"), t("maxFileDesc"), this.draft.maxFileMb, async (value) => {
+      this.draft.maxFileMb = value;
     });
-    numberSetting(this.contentEl, t("vaultMaxBytes"), t("vaultMaxBytesDesc"), Math.round(this.plugin.settings.vaultMaxBytes / (1024 * 1024)), async (value) => {
-      this.plugin.settings.vaultMaxBytes = clampNonNegative(Number(value) * 1024 * 1024, 0, 1024 * 1024 * 1024 * 1024);
-      await this.plugin.saveSettings();
+    numberSetting(this.contentEl, t("vaultMaxFiles"), t("vaultMaxFilesDesc"), this.draft.vaultMaxFiles, async (value) => {
+      this.draft.vaultMaxFiles = value;
     });
-    numberSetting(this.contentEl, t("trashDays"), "", this.plugin.settings.trashDays, async (value) => {
-      this.plugin.settings.trashDays = clampTrashDays(value);
-      await this.plugin.saveSettings();
+    numberSetting(this.contentEl, t("vaultMaxBytes"), t("vaultMaxBytesDesc"), this.draft.vaultMaxBytesMb, async (value) => {
+      this.draft.vaultMaxBytesMb = value;
     });
-    numberSetting(this.contentEl, t("trashFiles"), "", this.plugin.settings.trashMaxFiles, async (value) => {
-      this.plugin.settings.trashMaxFiles = clampNonNegative(value, 200, 100_000);
-      await this.plugin.saveSettings();
+    numberSetting(this.contentEl, t("trashDays"), t("trashDaysDesc"), this.draft.trashDays, async (value) => {
+      this.draft.trashDays = value;
+    });
+    numberSetting(this.contentEl, t("trashFiles"), "", this.draft.trashMaxFiles, async (value) => {
+      this.draft.trashMaxFiles = value;
     });
     new Setting(this.contentEl).setName(t("trashTitle")).addButton((button) => {
       button.setButtonText(t("trashOpen")).onClick(() => { new TrashModal(this.app, this.plugin).open(); });
     });
-    new Setting(this.contentEl)
-      .setName(t("transferParallel"))
-      .setDesc(t("transferParallelDesc"))
-      .addText((text) => {
-        text.setPlaceholder("10")
-          .setValue(String(this.plugin.settings.transferParallel));
-        const apply = async (value: string, snap: boolean) => {
-          const raw = Number(value.trim());
-          if (!Number.isFinite(raw) || !Number.isInteger(raw)) return;
-          if (!snap && (raw < 1 || raw > 20)) return;
-          const slots = clampTransferParallel(raw);
-          if (snap && String(slots) !== value.trim()) {
-            text.setValue(String(slots));
-            if (raw > 20) new Notice(t("transferParallelMax", { n: slots }));
-            else if (raw < 1) new Notice(t("transferParallelMin", { n: slots }));
-          }
-          if (slots === this.plugin.settings.transferParallel) return;
-          this.plugin.settings.transferParallel = slots;
-          await this.plugin.saveSettings();
-        };
-        text.onChange((value) => { void apply(value, false); });
-        text.inputEl.addEventListener("change", () => { void apply(text.getValue(), true); });
-      });
 
     new Setting(this.contentEl)
-      .setName(t("autoVersionLimit"))
-      .setDesc(t("autoVersionLimitDesc"))
+      .setName(t("autoSync"))
+      .setDesc(t("autoSyncDesc"))
+      .addToggle((toggle) => {
+        toggle.setValue(this.draft.autoSync).onChange((value) => { this.draft.autoSync = value; });
+      })
       .addText((text) => {
-        text.setPlaceholder("100");
-        text.setValue(String(this.plugin.settings.autoVersionLimit));
-        const apply = async (value: string, snap: boolean) => {
-          const raw = Number(value.trim());
-          if (!Number.isFinite(raw) || !Number.isInteger(raw)) return;
-          if (!snap && (raw < 1 || raw > 256)) return;
-          const limit = clampAutoVersionLimit(raw);
-          if (snap && String(limit) !== value.trim()) {
-            text.setValue(String(limit));
-            new Notice(t("autoVersionLimitRange", { n: limit }));
-          }
-          if (limit === this.plugin.settings.autoVersionLimit) return;
-          this.plugin.settings.autoVersionLimit = limit;
-          await this.plugin.saveSettings();
-        };
-        text.onChange((value) => { void apply(value, false); });
-        text.inputEl.addEventListener("change", () => { void apply(text.getValue(), true); });
+        text.setPlaceholder("30")
+          .setValue(String(this.draft.autoSyncSeconds));
+        text.onChange((value) => {
+          const seconds = Number(value.trim());
+          if (Number.isFinite(seconds) && Number.isInteger(seconds)) this.draft.autoSyncSeconds = seconds;
+        });
       });
+
+    numberSetting(this.contentEl, t("transferParallel"), t("transferParallelDesc"), this.draft.transferParallel, async (value) => {
+      this.draft.transferParallel = value;
+    });
+    numberSetting(this.contentEl, t("autoVersionLimit"), t("autoVersionLimitDesc"), this.draft.autoVersionLimit, async (value) => {
+      this.draft.autoVersionLimit = value;
+    });
 
     new Setting(this.contentEl)
       .setName(t("openHistory"))
@@ -707,8 +659,27 @@ class AdvancedSettingsModal extends Modal {
     }
 
     const actions = this.contentEl.createDiv({ cls: "inkwell-actions" });
-    const close = actions.createEl("button", { text: t("close") });
-    close.onclick = () => this.close();
+    const save = actions.createEl("button", { text: t("save"), cls: "mod-cta" });
+    save.onclick = () => { void this.save(); };
+    const cancel = actions.createEl("button", { text: t("cancel") });
+    cancel.onclick = () => this.close();
+  }
+
+  private async save(): Promise<void> {
+    const settings = this.plugin.settings;
+    settings.maxFileBytes = clampMaxFileBytes(this.draft.maxFileMb * 1024 * 1024);
+    settings.vaultMaxFiles = clampNonNegative(this.draft.vaultMaxFiles, 0, 1_000_000);
+    settings.vaultMaxBytes = clampNonNegative(this.draft.vaultMaxBytesMb * 1024 * 1024, 0, 1024 * 1024 * 1024 * 1024);
+    settings.trashDays = clampTrashDays(this.draft.trashDays);
+    settings.trashMaxFiles = clampNonNegative(this.draft.trashMaxFiles, 200, 100_000);
+    settings.autoSync = this.draft.autoSync;
+    settings.autoSyncSeconds = Math.min(86400, Math.max(30, Math.floor(this.draft.autoSyncSeconds || 30)));
+    settings.transferParallel = clampTransferParallel(this.draft.transferParallel);
+    settings.autoVersionLimit = clampAutoVersionLimit(this.draft.autoVersionLimit);
+    await this.plugin.saveSettings();
+    this.plugin.reschedule();
+    new Notice(t("advancedSaved"));
+    this.close();
   }
 
   onClose(): void {

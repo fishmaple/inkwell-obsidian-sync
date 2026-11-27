@@ -1,6 +1,6 @@
 import { MAX_FILE_BYTES } from "../shared/src/protocol";
 
-export const DEFAULT_MAX_FILE_BYTES = 32 * 1024 * 1024;
+export const DEFAULT_MAX_FILE_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_TRASH_DAYS = 30;
 export const DEFAULT_TRASH_FILES = 200;
 

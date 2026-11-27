@@ -118,7 +118,7 @@ const DEFAULT_SETTINGS: SyncSettings = {
   autoSyncSeconds: 30,
   transferParallel: 10,
   excludePatterns: [],
-  maxFileBytes: 32 * 1024 * 1024,
+  maxFileBytes: 16 * 1024 * 1024,
   vaultMaxFiles: 0,
   vaultMaxBytes: 0,
   trashDays: 30,
