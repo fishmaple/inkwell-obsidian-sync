@@ -203,6 +203,8 @@ export class InkwellSettingTab extends PluginSettingTab {
       });
     });
 
+    containerEl.createEl("h3", { text: t("syncBehavior") });
+
     new Setting(containerEl)
       .setName(t("syncSettings"))
       .setDesc(t("syncSettingsDesc"))
@@ -211,8 +213,6 @@ export class InkwellSettingTab extends PluginSettingTab {
           new SyncSettingsModal(this.app, this.plugin, () => this.display()).open();
         });
       });
-
-    containerEl.createEl("h3", { text: t("syncBehavior") });
 
     const bound = hasActiveBinding(this.plugin.settings);
     const vaults = new Setting(containerEl)
