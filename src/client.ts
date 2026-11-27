@@ -30,6 +30,7 @@ export interface ServerHealth {
   requireEncryption: boolean;
   oidc: boolean;
   devLogin: boolean;
+  batchSize?: number;
 }
 
 export interface Bootstrap {
@@ -78,6 +79,21 @@ export class SessionExpiredError extends Error {
     this.name = "SessionExpiredError";
   }
 }
+
+export interface BatchUploadRequest {
+  fileId: string;
+  parentRev: number | null;
+  bytes: number;
+  sha256: string;
+  content: string;
+  commit: Record<string, unknown>;
+  onUploaded?: () => void;
+}
+
+export type BatchUploadOutcome =
+  | { fileId: string; result: PutResult & { versionId?: string; historyKind?: VersionKind; flush?: FlushWindow } }
+  | { fileId: string; conflict: SyncConflictError }
+  | { fileId: string; error: Error };
 
 export class SyncClient {
   constructor(
@@ -172,6 +188,110 @@ export class SyncClient {
       updatedAt: typeof body?.updatedAt === "number" ? body.updatedAt : Date.now(),
       ...readHistory(body),
     };
+  }
+
+  async putObjects(requests: BatchUploadRequest[], concurrency = 10): Promise<BatchUploadOutcome[]> {
+    if (requests.length === 0) return [];
+    const first = requests[0];
+    const vault = String(first.commit.vaultId ?? first.commit.vault ?? "");
+    const listed = await this.urlList(vault, {
+      uploads: requests.map((item) => ({
+        fileId: item.fileId,
+        parentRev: item.parentRev,
+        bytes: item.bytes,
+        sha256: item.sha256,
+      })),
+    });
+    const conflicts = new Map(listed.conflicts.map((item) => [item.fileId, item]));
+    const uploads = new Map(listed.uploads.map((item) => [item.fileId, item]));
+    const outcomes = new Map<string, BatchUploadOutcome>();
+    for (const item of requests) {
+      const conflict = conflicts.get(item.fileId);
+      if (conflict) {
+        outcomes.set(item.fileId, {
+          fileId: item.fileId,
+          conflict: new SyncConflictError(conflict.reason, conflictFile(conflict.file)),
+        });
+        continue;
+      }
+      if (!uploads.has(item.fileId)) {
+        outcomes.set(item.fileId, { fileId: item.fileId, error: new Error("The server did not return an upload URL") });
+      }
+    }
+    const pending = requests.filter((item) => !outcomes.has(item.fileId));
+    await runPoolMap(pending, concurrency, async (item) => {
+      const upload = uploads.get(item.fileId);
+      if (!upload) return;
+      try {
+        const sent = await transfer("PUT", upload.url, item.content, upload.headers);
+        if (sent.status >= 400) {
+          outcomes.set(item.fileId, { fileId: item.fileId, error: new Error(errorMessage(sent)) });
+          return;
+        }
+        item.onUploaded?.();
+      } catch (error) {
+        outcomes.set(item.fileId, { fileId: item.fileId, error: error instanceof Error ? error : new Error(String(error)) });
+      }
+    });
+    const committed = requests.filter((item) => !outcomes.has(item.fileId));
+    if (committed.length === 0) return finalOutcomes(requests, outcomes);
+    const response = await send("POST", `${this.host}/api/v1/objects/commit-batch`, {
+      authorization: `Bearer ${this.token}`,
+      "content-type": "application/json; charset=utf-8",
+    }, JSON.stringify({
+      commits: committed.map((item) => ({
+        fileId: item.fileId,
+        body: { ...item.commit, blobBytes: item.bytes },
+      })),
+    }), this.onRetry);
+    if (response.status === 401) throw new SessionExpiredError();
+    if (response.status >= 400) {
+      const message = errorMessage(response);
+      for (const item of committed) outcomes.set(item.fileId, { fileId: item.fileId, error: new Error(message) });
+      return finalOutcomes(requests, outcomes);
+    }
+    const body = response.json as { results?: Array<{ fileId?: unknown; status?: unknown; body?: unknown }> } | null;
+    const results = new Map<string, { status: number; body: unknown }>();
+    for (const item of body?.results ?? []) {
+      if (typeof item?.fileId === "string" && typeof item.status === "number") {
+        results.set(item.fileId, { status: item.status, body: item.body });
+      }
+    }
+    for (const item of committed) {
+      const result = results.get(item.fileId);
+      if (!result) {
+        outcomes.set(item.fileId, { fileId: item.fileId, error: new Error("The server did not return a commit result") });
+        continue;
+      }
+      const payload = result.body as Partial<ConflictBody & PutResult> | null;
+      const commit = item.commit;
+      if (result.status >= 200 && result.status < 300) {
+        const rawEncoding = payload?.encoding ?? commit.encoding;
+        const encoding: "plain" | "e2ee" = rawEncoding === "e2ee" ? "e2ee" : "plain";
+        outcomes.set(item.fileId, {
+          fileId: item.fileId,
+          result: {
+            ok: true,
+            rev: typeof payload?.rev === "number" ? payload.rev : 0,
+            contentMac: typeof payload?.contentMac === "string" ? payload.contentMac : String(commit.contentMac ?? ""),
+            mtime: typeof payload?.mtime === "number" ? payload.mtime : Number(commit.mtime ?? 0),
+            encoding,
+            size: typeof payload?.size === "number" ? payload.size : Number(commit.size ?? 0),
+            updatedAt: typeof payload?.updatedAt === "number" ? payload.updatedAt : Date.now(),
+            ...readHistory(payload),
+          },
+        });
+      } else if (result.status === 409 && payload && (payload.reason === "parent_rev" || payload.reason === "deleted")) {
+        outcomes.set(item.fileId, {
+          fileId: item.fileId,
+          conflict: new SyncConflictError(payload.reason, conflictFile(payload.file as RemoteFile | null)),
+        });
+      } else {
+        const message = typeof payload?.error === "string" ? payload.error : `Commit failed (${result.status})`;
+        outcomes.set(item.fileId, { fileId: item.fileId, error: new Error(message) });
+      }
+    }
+    return finalOutcomes(requests, outcomes);
   }
 
   async putCheckpoint(
@@ -451,13 +571,37 @@ async function transfer(method: "GET" | "PUT", url: string, body?: string, extra
   return send(method, url, headers, body, undefined, 120_000);
 }
 
-function sha256Hex(text: string): string {
+export function sha256Hex(text: string): string {
   try {
     const crypto = require("crypto") as { createHash: (algorithm: string) => { update: (value: string) => { digest: (encoding: string) => string } } };
     return crypto.createHash("sha256").update(text).digest("hex");
   } catch {
     return "";
   }
+}
+
+async function runPoolMap<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Math.min(Math.max(1, limit), items.length);
+  await Promise.all(Array.from({ length: workers }, async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      results[index] = await worker(items[index]);
+    }
+  }));
+  return results;
+}
+
+function finalOutcomes(
+  requests: BatchUploadRequest[],
+  outcomes: Map<string, BatchUploadOutcome>,
+): BatchUploadOutcome[] {
+  return requests.map((item) => outcomes.get(item.fileId) ?? {
+    fileId: item.fileId,
+    error: new Error("The upload did not finish"),
+  });
 }
 
 async function send(

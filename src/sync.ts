@@ -13,7 +13,7 @@ import {
   rememberCheckpointRetry,
   type CheckpointFlushCounts,
 } from "./checkpoint-retry";
-import { SyncClient, SyncConflictError, fetchBootstrap, openExternal, resolveSyncHost } from "./client";
+import { SyncClient, SyncConflictError, fetchBootstrap, fetchHealth, openExternal, resolveSyncHost, sha256Hex, type BatchUploadRequest } from "./client";
 import { askConflict, type ConflictChoice, type ConflictView } from "./conflict";
 import { excludedPath } from "./exclude";
 import { clampMaxFileBytes } from "./limits";
@@ -131,7 +131,8 @@ async function runVaultSync(plugin: InkwellPlugin, ready: ReadyClient, pass: Syn
   const uploads: Parameters<typeof uploadTracked>[3][] = [];
   const conflictJobs: Parameters<typeof pendingConflict>[1][] = [];
   const total = files.length + remote.size;
-  const counts = () => uploaded + downloaded + unchanged + removed;
+  let uploadProgress = 0;
+  const progressCounts = () => downloaded + unchanged + removed + uploadProgress;
 
   for (const file of files) {
     const fileId = indexedFileId(index, file.path) ?? (ready.keys
@@ -157,7 +158,7 @@ async function runVaultSync(plugin: InkwellPlugin, ready: ReadyClient, pass: Syn
       await plugin.app.vault.delete(file);
       delete index[fileId];
       removed++;
-      plugin.showProgress(t("syncProgress", { done: counts(), total }));
+      plugin.showProgress(t("syncProgress", { done: progressCounts(), total }));
       continue;
     }
     if (action.type === "download") {
@@ -297,18 +298,7 @@ async function runVaultSync(plugin: InkwellPlugin, ready: ReadyClient, pass: Syn
       const saved = await pullRemote(plugin, ready, item.file, index, enqueue);
       if (saved) downloaded++;
       else if (item.countMiss) unchanged++;
-      plugin.showProgress(t("syncProgress", { done: counts(), total }));
-    });
-  }
-  for (let i = 0; i < uploads.length; i++) {
-    const input = uploads[i];
-    if (!input) continue;
-    tasks.push(async () => {
-      const outcome = await uploadTracked(plugin, ready, index, input, pass === "push");
-      if (outcome === "uploaded") uploaded++;
-      else if (outcome === "deferred") pendingPull++;
-      else uploadConflicts[i] = outcome;
-      plugin.showProgress(t("syncProgress", { done: counts(), total }));
+      plugin.showProgress(t("syncProgress", { done: progressCounts(), total }));
     });
   }
   for (let i = 0; i < conflictJobs.length; i++) {
@@ -318,7 +308,69 @@ async function runVaultSync(plugin: InkwellPlugin, ready: ReadyClient, pass: Syn
       fetchedConflicts[i] = await pendingConflict(ready, input);
     });
   }
-  await runPool(tasks, clampTransferParallel(plugin.settings.transferParallel), (task) => task());
+
+  const parallel = clampTransferParallel(plugin.settings.transferParallel);
+  const uploadEntries = uploads
+    .map((input, index) => ({ input, index }))
+    .filter((entry) => Boolean(entry.input));
+  const uploadWork = async () => {
+    let uploadError: Error | null = null;
+    for (const batch of chunk(uploadEntries, ready.batchSize)) {
+      const prepared = await runPoolMap(batch, parallel, async (entry) => ({
+        entry,
+        prepared: await prepareUpload(ready, entry.input, () => {
+          uploadProgress++;
+          plugin.showProgress(t("syncProgress", { done: progressCounts(), total }));
+        }),
+      }));
+      const outcomes = await ready.client.putObjects(prepared.map((item) => item.prepared.request), parallel);
+      const byFile = new Map(prepared.map((item) => [item.prepared.request.fileId, item]));
+      for (const outcome of outcomes) {
+        const item = byFile.get(outcome.fileId);
+        if (!item) continue;
+        const { input, index: uploadIndex } = item.entry;
+        if ("result" in outcome) {
+          const result = outcome.result;
+          index[input.fileId] = syncedEntry(input.path, input.mtime, input.size, input.mac, input.encoding, result.rev || input.remote?.rev);
+          uploaded++;
+          if (item.prepared.request.commit.historyKind === "delta" && result.historyKind !== "checkpoint" && result.flush?.due && result.rev > 0) {
+            const tip = {
+              rev: result.rev,
+              contentMac: result.contentMac,
+              size: result.size,
+              mtime: result.mtime,
+              encoding: result.encoding,
+            };
+            const checkpoint = await storeCheckpoint(ready, input.fileId, item.prepared.contentCipher, tip);
+            noteCheckpoint(checkpoint, input.fileId, tip);
+          }
+        } else if ("conflict" in outcome) {
+          if (pass === "push") {
+            pendingPull++;
+          } else {
+            uploadConflicts[uploadIndex] = await pendingFromError(
+              ready,
+              input.fileId,
+              input.path,
+              input.plain,
+              input.base,
+              input.encoding,
+              outcome.conflict,
+              0,
+            );
+          }
+        } else {
+          uploadError ??= outcome.error;
+        }
+      }
+      plugin.showProgress(t("syncProgress", { done: progressCounts(), total }));
+    }
+    if (uploadError) throw uploadError;
+  };
+  await Promise.all([
+    runPool(tasks, parallel, (task) => task()),
+    uploadWork(),
+  ]);
   for (const item of uploadConflicts) if (item) conflicts.push(item);
   for (const item of fetchedConflicts) if (item) conflicts.push(item);
 
@@ -533,6 +585,60 @@ async function putFile(
     noteCheckpoint(outcome, fileId, tip, history.syncTrigger);
   }
   return result;
+}
+
+interface PreparedUpload {
+  request: BatchUploadRequest;
+  contentCipher: PayloadCipher;
+}
+
+async function prepareUpload(
+  ready: ReadyClient,
+  input: Parameters<typeof uploadTracked>[3],
+  onUploaded: () => void,
+): Promise<PreparedUpload> {
+  const contentCipher = ready.keys
+    ? await sealBytes(ready.keys.encKey, input.plain, bodyAad(input.fileId), true)
+    : { v: 0 as const, raw: bytesToBase64(input.plain) };
+  const history = await historyUpload(ready, input.fileId, input.plain, input.parentRev);
+  const content = JSON.stringify(contentCipher);
+  const bytes = new TextEncoder().encode(content).byteLength;
+  const pathCipher = ready.keys
+    ? await sealBytes(ready.keys.encKey, new TextEncoder().encode(input.path), `path:${input.fileId}`, true)
+    : { v: 0, raw: bytesToBase64(new TextEncoder().encode(input.path)) };
+  const commit: Record<string, unknown> = {
+    vault: ready.vaultName,
+    vaultId: ready.vaultId,
+    pathCipher,
+    pathMac: await fingerprint(ready, new TextEncoder().encode(input.path)),
+    renamed: input.renamed === true,
+    contentCipher,
+    contentMac: input.mac,
+    size: input.size,
+    mtime: input.mtime,
+    encoding: input.encoding,
+    parentRev: input.parentRev,
+    parent_rev: input.parentRev,
+    ...(history.syncTrigger ? { syncTrigger: history.syncTrigger } : {}),
+    ...(typeof history.autoLimit === "number" ? { autoLimit: history.autoLimit } : {}),
+    ...(history.historyKind ? { historyKind: history.historyKind } : {}),
+    ...(history.patchCipher ? { patchCipher: history.patchCipher } : {}),
+    ...(history.historyKind === "checkpoint" && bytes <= 512 * 1024
+      ? { checkpointCipher: contentCipher }
+      : {}),
+  };
+  return {
+    contentCipher,
+    request: {
+      fileId: input.fileId,
+      parentRev: input.parentRev,
+      bytes,
+      sha256: sha256Hex(content),
+      content,
+      commit,
+      onUploaded,
+    },
+  };
 }
 
 async function historyUpload(
@@ -1213,6 +1319,27 @@ function createSerial(): <T>(fn: () => Promise<T>) => Promise<T> {
   };
 }
 
+function chunk<T>(items: T[], size: number): T[][] {
+  const step = Math.max(1, Math.floor(size));
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += step) chunks.push(items.slice(index, index + step));
+  return chunks;
+}
+
+async function runPoolMap<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Math.min(Math.max(1, limit), items.length);
+  await Promise.all(Array.from({ length: workers }, async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      results[index] = await worker(items[index]);
+    }
+  }));
+  return results;
+}
+
 async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
   if (items.length === 0) return;
   let next = 0;
@@ -1384,6 +1511,7 @@ export async function openBoundClient(plugin: InkwellPlugin, syncTrigger: "auto"
   vaultName: string;
   vaultId: string;
   syncTrigger: "auto" | "manual";
+  batchSize: number;
   autoLimitFor: (fileId: string) => number;
 }> {
   const token = plugin.settings.apiToken.trim();
@@ -1395,6 +1523,15 @@ export async function openBoundClient(plugin: InkwellPlugin, syncTrigger: "auto"
   }
   await plugin.alignEncryptionWithRemote();
   const host = resolveSyncHost(plugin.settings.host);
+  let batchSize = 100;
+  try {
+    const health = await fetchHealth(host);
+    if (typeof health.batchSize === "number" && health.batchSize > 0) {
+      batchSize = Math.min(200, Math.max(1, Math.floor(health.batchSize)));
+    }
+  } catch {
+    // Older servers do not report a batch size.
+  }
   const keys = plugin.settings.encryptNotes ? await deriveKeys(requireSecret(plugin.settings.secretKey)) : null;
   return {
     host,
@@ -1403,6 +1540,7 @@ export async function openBoundClient(plugin: InkwellPlugin, syncTrigger: "auto"
     vaultName,
     vaultId,
     syncTrigger,
+    batchSize,
     autoLimitFor: (fileId: string) => {
       const override = plugin.settings.versionLimitOverrides[fileId];
       return clampAutoVersionLimit(typeof override === "number" ? override : plugin.settings.autoVersionLimit);
