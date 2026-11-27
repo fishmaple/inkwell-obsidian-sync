@@ -79,14 +79,6 @@ export class SessionExpiredError extends Error {
   }
 }
 
-let commitTail: Promise<void> = Promise.resolve();
-
-function queueCommit<T>(work: () => Promise<T>): Promise<T> {
-  const run = commitTail.then(work, work);
-  commitTail = run.then(() => undefined, () => undefined);
-  return run;
-}
-
 export class SyncClient {
   constructor(
     private readonly host: string,
@@ -133,7 +125,7 @@ export class SyncClient {
     if (!upload) throw new Error("The server did not return an upload URL");
     const sent = await transfer("PUT", upload.url, content, upload.headers);
     if (sent.status >= 400) throw new Error(errorMessage(sent));
-    const response = await queueCommit(() => send("POST", `${this.host}/api/v1/objects/${fileId}/commit`, {
+    const response = await send("POST", `${this.host}/api/v1/objects/${fileId}/commit`, {
       authorization: `Bearer ${this.token}`,
       "content-type": "application/json; charset=utf-8",
     }, JSON.stringify({
@@ -153,7 +145,10 @@ export class SyncClient {
       ...(typeof history?.autoLimit === "number" ? { autoLimit: history.autoLimit } : {}),
       ...(history?.historyKind ? { historyKind: history.historyKind } : {}),
       ...(history?.patchCipher ? { patchCipher: history.patchCipher } : {}),
-    }), this.onRetry));
+      ...(history?.historyKind === "checkpoint" && bytes <= 512 * 1024
+        ? { checkpointCipher: payload.contentCipher }
+        : {}),
+    }), this.onRetry);
     const body = response.json as Partial<ConflictBody & PutResult> | null;
     if (response.status === 401) throw new SessionExpiredError();
     if (response.status === 409 && body && (body.reason === "parent_rev" || body.reason === "deleted")) {
