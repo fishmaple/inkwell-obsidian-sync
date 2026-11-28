@@ -5,6 +5,7 @@ import {
   normalizeObsidianConfig,
   obsidianConfigCategory,
   obsidianConfigEnabled,
+  isConfigDirPath,
 } from "./src/obsidian-config";
 
 test("classifies the built-in Obsidian setting files", () => {
@@ -60,4 +61,19 @@ test("normalizes stored settings and ignores invalid values", () => {
   assert.equal(settings.pluginData, false);
   assert.equal(settings.hotkeys, false);
   assert.equal("unknown" in settings, false);
+});
+
+test("recognizes conflict copies anywhere under the config folder", () => {
+  assert.equal(isConfigDirPath(".obsidian", ".obsidian"), true);
+  assert.equal(isConfigDirPath(".obsidian/app (Conflicted copy).json", ".obsidian"), true);
+  assert.equal(isConfigDirPath(".obsidian/plugins/dataview/main.js", ".obsidian"), true);
+  assert.equal(isConfigDirPath(".obsidianish/app.json", ".obsidian"), false);
+  assert.equal(isConfigDirPath("notes/app.json", ".obsidian"), false);
+  assert.equal(obsidianConfigCategory(".obsidian/app (Conflicted copy).json"), null);
+});
+
+test("supports a custom config folder", () => {
+  assert.equal(obsidianConfigCategory("my-config/app.json", "my-config"), "app");
+  assert.equal(obsidianConfigEnabled("my-config/app.json", DEFAULT_OBSIDIAN_CONFIG, "my-config"), true);
+  assert.equal(isConfigDirPath("my-config/snippets/a.css", "my-config"), true);
 });
