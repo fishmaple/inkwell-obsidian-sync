@@ -322,6 +322,7 @@ async function runVaultSync(plugin: InkwellPlugin, ready: ReadyClient, pass: Syn
         base: cached ?? null,
         remote: remoteFile,
         renamed: pathDirty,
+        inline: file.config,
       });
       continue;
     }
@@ -349,6 +350,7 @@ async function runVaultSync(plugin: InkwellPlugin, ready: ReadyClient, pass: Syn
               parentRev: remoteRev(remoteFile) || null,
               base: cached ?? null,
               remote: remoteFile,
+              inline: file.config,
             });
           }
         } else {
@@ -794,7 +796,7 @@ async function prepareUpload(
       sha256: sha256Hex(content),
       content,
       commit,
-      inline: isObsidianConfigPath(input.path),
+      inline: input.inline ?? isObsidianConfigPath(input.path),
       onUploaded,
     },
   };
@@ -1013,6 +1015,7 @@ async function uploadTracked(
     base: FileIndexEntry | null;
     remote: RemoteFile | null;
     renamed?: boolean;
+    inline?: boolean;
   },
   deferConflict = false,
 ): Promise<"uploaded" | PendingConflict | "deferred"> {
