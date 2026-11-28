@@ -15,6 +15,7 @@ import { hasActiveBinding } from "./binding";
 import { TrashModal } from "./trash";
 import { clampMaxFileBytes, clampNonNegative, clampTrashDays } from "./limits";
 import { FILE_GROUPS, isKnownSuffix, normalizeSuffix } from "./file-kinds";
+import { DEFAULT_OBSIDIAN_CONFIG, type ObsidianConfigCategory, type ObsidianConfigSettings } from "./obsidian-config";
 import type InkwellPlugin from "./main";
 
 export class InkwellSettingTab extends PluginSettingTab {
@@ -694,6 +695,7 @@ class SyncSettingsModal extends Modal {
   private customBox: HTMLElement | null = null;
   private excludePatterns: string[] = [];
   private excludeBox: HTMLElement | null = null;
+  private obsidianConfig: ObsidianConfigSettings = { ...DEFAULT_OBSIDIAN_CONFIG };
 
   constructor(app: App, private readonly plugin: InkwellPlugin, private readonly done: () => void) {
     super(app);
@@ -701,6 +703,7 @@ class SyncSettingsModal extends Modal {
     this.includeOther = plugin.settings.syncOther;
     this.custom = [...plugin.settings.customSuffixes];
     this.excludePatterns = [...(plugin.settings.excludePatterns ?? [])];
+    this.obsidianConfig = { ...DEFAULT_OBSIDIAN_CONFIG, ...plugin.settings.obsidianConfig };
   }
 
   onOpen(): void {
@@ -755,6 +758,28 @@ class SyncSettingsModal extends Modal {
       this.includeOther = otherInput.checked;
     };
     other.createSpan({ text: t("groupOtherDesc") });
+    this.contentEl.createEl("h3", { text: t("obsidianConfigTitle") });
+    this.contentEl.createEl("p", { text: t("obsidianConfigDesc"), cls: "inkwell-status-line" });
+    const configRows = [
+      ["app", "configApp", "configAppDesc"],
+      ["pluginSwitches", "configPluginSwitches", "configPluginSwitchesDesc"],
+      ["themes", "configThemes", "configThemesDesc"],
+      ["other", "configOther", "configOtherDesc"],
+      ["pluginData", "configPluginData", "configPluginDataDesc"],
+      ["hotkeys", "configHotkeys", "configHotkeysDesc"],
+      ["workspace", "configWorkspace", "configWorkspaceDesc"],
+    ] as const satisfies ReadonlyArray<readonly [ObsidianConfigCategory, Parameters<typeof t>[0], Parameters<typeof t>[0]]>;
+    for (const [category, labelKey, descKey] of configRows) {
+      const row = this.contentEl.createEl("label", { cls: "inkwell-check" });
+      const toggle = row.createEl("input", { type: "checkbox" });
+      toggle.checked = this.obsidianConfig[category];
+      toggle.onchange = () => {
+        this.obsidianConfig[category] = toggle.checked;
+      };
+      const text = row.createSpan();
+      text.createSpan({ text: t(labelKey) });
+      text.createEl("div", { text: t(descKey), cls: "inkwell-status-line" });
+    }
     this.contentEl.createEl("h3", { text: t("excludePatterns") });
     this.contentEl.createEl("p", { text: t("excludePatternsDesc"), cls: "inkwell-status-line" });
     this.excludeBox = this.contentEl.createDiv({ cls: "inkwell-exclude-list" });
@@ -837,6 +862,7 @@ class SyncSettingsModal extends Modal {
     this.plugin.settings.customSuffixes = [...this.custom];
     this.plugin.settings.syncSuffixes = [...this.selected];
     this.plugin.settings.syncOther = this.includeOther;
+    this.plugin.settings.obsidianConfig = { ...this.obsidianConfig };
     this.plugin.settings.excludePatterns = this.excludePatterns
       .map((item) => item.trim())
       .filter(Boolean)

@@ -18,6 +18,7 @@ import { askConflict, type ConflictChoice, type ConflictView } from "./conflict"
 import { excludedPath } from "./exclude";
 import { clampMaxFileBytes } from "./limits";
 import { suffixSelected } from "./file-kinds";
+import { obsidianConfigCategory, obsidianConfigEnabled, isConfigDirPath, isObsidianConfigPath, type ObsidianConfigSettings } from "./obsidian-config";
 import { t } from "./i18n";
 import { isDesktopApp, obsidianConfigDir, warnMissingObsidianConfig } from "./obsidian-dir";
 import type InkwellPlugin from "./main";
@@ -41,10 +42,139 @@ const PLUGIN_FILES = new Set([
   ".obsidian/plugins/inkwell/styles.css",
 ]);
 
-export function isSyncablePath(path: string): boolean {
+export function isSyncablePath(
+  path: string,
+  obsidianConfig?: ObsidianConfigSettings,
+  configDir = ".obsidian",
+  allowDisabledConfig = false,
+): boolean {
   const normalized = path.replaceAll("\\", "/");
   if (PLUGIN_FILES.has(normalized)) return true;
+  if (isObsidianConfigPath(normalized, configDir)) {
+    return allowDisabledConfig || obsidianConfigEnabled(normalized, obsidianConfig, configDir);
+  }
   return normalized.split("/").every((part) => part && !BLOCKED.has(part));
+}
+
+interface LocalFile {
+  path: string;
+  mtime: number;
+  size: number;
+  config: boolean;
+  readBinary: () => Promise<ArrayBuffer>;
+}
+
+/**
+ * `Vault.getFiles()` omits the config folder, so the selected Obsidian
+ * settings are enumerated through the adapter. Only known small config files
+ * are collected; plugin code and caches never enter the sync set.
+ */
+async function collectLocalFiles(plugin: InkwellPlugin): Promise<LocalFile[]> {
+  const vault = plugin.app.vault;
+  const configDir = vault.configDir || ".obsidian";
+  const settings = plugin.settings.obsidianConfig;
+  const patterns = plugin.settings.excludePatterns ?? [];
+  const files: LocalFile[] = vault.getFiles()
+    .filter((file) => shouldSync(plugin, file.path))
+    .map((file) => ({
+      path: file.path,
+      mtime: file.stat.mtime,
+      size: file.stat.size,
+      config: false,
+      readBinary: () => vault.readBinary(file),
+    }));
+  const seenPaths = new Set(files.map((file) => file.path));
+
+  const add = async (path: string): Promise<void> => {
+    if (seenPaths.has(path)) return;
+    const category = obsidianConfigCategory(path, configDir);
+    if (!category || !settings[category]) return;
+    if (excludedPath(path, patterns)) return;
+    try {
+      const stat = await vault.adapter.stat(path);
+      if (!stat || typeof stat.mtime !== "number") return;
+      seenPaths.add(path);
+      files.push({
+        path,
+        mtime: stat.mtime,
+        size: typeof stat.size === "number" ? stat.size : 0,
+        config: true,
+        readBinary: () => vault.adapter.readBinary(path),
+      });
+    } catch (error) {
+      console.warn(`Could not inspect Obsidian config file ${path}`, error);
+    }
+  };
+
+  const walk = async (folder: string): Promise<void> => {
+    let listed: { files: string[]; folders: string[] };
+    try {
+      listed = await vault.adapter.list(folder);
+    } catch {
+      return;
+    }
+    for (const path of listed.files) await add(path);
+    for (const child of listed.folders) await walk(child);
+  };
+
+  try {
+    const top = await vault.adapter.list(configDir);
+    for (const path of top.files) await add(path);
+  } catch {
+    // No config folder yet, or the adapter cannot see it.
+  }
+  await walk(`${configDir}/themes`);
+  await walk(`${configDir}/snippets`);
+  try {
+    const plugins = await vault.adapter.list(`${configDir}/plugins`);
+    for (const folder of plugins.folders) await add(`${folder}/data.json`);
+  } catch {
+    // No community plugins.
+  }
+  return files;
+}
+
+async function localFileExists(plugin: InkwellPlugin, path: string): Promise<boolean> {
+  const configDir = plugin.app.vault.configDir || ".obsidian";
+  if (isConfigDirPath(path, configDir)) {
+    try {
+      return await plugin.app.vault.adapter.exists(path);
+    } catch {
+      return false;
+    }
+  }
+  return plugin.app.vault.getAbstractFileByPath(path) instanceof TFile;
+}
+
+async function readLocalFile(plugin: InkwellPlugin, path: string): Promise<{ plain: Uint8Array; mtime: number; size: number } | null> {
+  const configDir = plugin.app.vault.configDir || ".obsidian";
+  if (isConfigDirPath(path, configDir)) {
+    try {
+      const stat = await plugin.app.vault.adapter.stat(path);
+      if (!stat) return null;
+      const plain = new Uint8Array(await plugin.app.vault.adapter.readBinary(path));
+      return { plain, mtime: stat.mtime, size: plain.byteLength };
+    } catch {
+      return null;
+    }
+  }
+  const file = plugin.app.vault.getAbstractFileByPath(path);
+  if (!(file instanceof TFile)) return null;
+  return {
+    plain: new Uint8Array(await plugin.app.vault.readBinary(file)),
+    mtime: file.stat.mtime,
+    size: file.stat.size,
+  };
+}
+
+async function deleteLocalPath(plugin: InkwellPlugin, path: string): Promise<void> {
+  const configDir = plugin.app.vault.configDir || ".obsidian";
+  if (isConfigDirPath(path, configDir)) {
+    await plugin.app.vault.adapter.remove(path);
+    return;
+  }
+  const file = plugin.app.vault.getAbstractFileByPath(path);
+  if (file instanceof TFile) await plugin.app.vault.delete(file);
 }
 
 export function propagatePlugin(plugin: InkwellPlugin): string[] {
@@ -113,7 +243,7 @@ async function runVaultSync(plugin: InkwellPlugin, ready: ReadyClient, pass: Syn
     const boot = await fetchBootstrap(ready.host, plugin.settings.accessToken);
     if (boot.requireEncryption) throw new Error(t("serverEncrypt"));
   }
-  const files = plugin.app.vault.getFiles().filter((file) => shouldSync(plugin, file.path));
+  const files = await collectLocalFiles(plugin);
   const loaded = await loadRemote(plugin, ready);
   const remote = loaded.remote;
   const seen = new Set<string>();
@@ -141,7 +271,7 @@ async function runVaultSync(plugin: InkwellPlugin, ready: ReadyClient, pass: Syn
     seen.add(fileId);
     const cached = index[fileId];
     const remoteFile = remote.get(fileId) ?? null;
-    const plain = new Uint8Array(await plugin.app.vault.readBinary(file));
+    const plain = new Uint8Array(await file.readBinary());
     const mac = await fingerprint(ready, plain);
     const action = decideSyncAction({
       local: { contentMac: mac, encoding },
@@ -150,12 +280,12 @@ async function runVaultSync(plugin: InkwellPlugin, ready: ReadyClient, pass: Syn
     });
     const pathDirty = cached?.path === file.path && cached.pathDirty === true;
     if (action.type === "unchanged" && !pathDirty) {
-      index[fileId] = syncedEntry(file.path, file.stat.mtime, file.stat.size, mac, encoding, remoteRev(remoteFile ?? {}) || cached?.rev);
+      index[fileId] = syncedEntry(file.path, file.mtime, file.size, mac, encoding, remoteRev(remoteFile ?? {}) || cached?.rev);
       unchanged++;
       continue;
     }
     if (action.type === "delete-local") {
-      await plugin.app.vault.delete(file);
+      await deleteLocalPath(plugin, file.path);
       delete index[fileId];
       removed++;
       plugin.showProgress(t("syncProgress", { done: progressCounts(), total }));
@@ -186,8 +316,8 @@ async function runVaultSync(plugin: InkwellPlugin, ready: ReadyClient, pass: Syn
         plain,
         mac,
         encoding,
-        mtime: file.stat.mtime,
-        size: file.stat.size,
+        mtime: file.mtime,
+        size: file.size,
         parentRev: action.type === "upload" ? action.parentRev : (remoteRev(remoteFile ?? {}) || cached?.rev || null),
         base: cached ?? null,
         remote: remoteFile,
@@ -198,6 +328,34 @@ async function runVaultSync(plugin: InkwellPlugin, ready: ReadyClient, pass: Syn
     if (action.type === "conflict") {
       if (plain.byteLength > fileLimit(plugin) || (remoteFile && remoteFile.size > fileLimit(plugin))) {
         skippedLarge.push(file.path);
+        continue;
+      }
+      // Settings are not prose, so there is nothing useful to merge or ask
+      // about. The newer side wins; push-only still defers remote content.
+      if (file.config && remoteFile) {
+        const remoteMtime = typeof remoteFile.mtime === "number" ? remoteFile.mtime : 0;
+        if (file.mtime > remoteMtime) {
+          const disposition = planDisposition(pass, "upload");
+          if (disposition === "pending-pull") pendingPull++;
+          else if (disposition === "run") {
+            uploads.push({
+              fileId,
+              path: file.path,
+              plain,
+              mac,
+              encoding,
+              mtime: file.mtime,
+              size: file.size,
+              parentRev: remoteRev(remoteFile) || null,
+              base: cached ?? null,
+              remote: remoteFile,
+            });
+          }
+        } else {
+          const disposition = planDisposition(pass, "download");
+          if (disposition === "pending-pull") pendingPull++;
+          else if (disposition === "run") downloads.push({ file: remoteFile, countMiss: true });
+        }
         continue;
       }
       if (planDisposition(pass, "conflict") === "pending-pull") {
@@ -219,7 +377,7 @@ async function runVaultSync(plugin: InkwellPlugin, ready: ReadyClient, pass: Syn
 
   for (const [fileId, cached] of Object.entries(index)) {
     if (seen.has(fileId) || !shouldSync(plugin, cached.path)) continue;
-    if (plugin.app.vault.getAbstractFileByPath(cached.path) instanceof TFile) continue;
+    if (await localFileExists(plugin, cached.path)) continue;
     const remoteFile = remote.get(fileId) ?? null;
     const action = decideSyncAction({
       local: null,
@@ -572,7 +730,7 @@ async function putFile(
     mtime,
     encoding,
     parentRev,
-  }, history);
+  }, history, isObsidianConfigPath(path));
   if (history.historyKind === "delta" && result.historyKind !== "checkpoint" && result.flush?.due && result.rev > 0) {
     const tip = {
       rev: result.rev,
@@ -636,6 +794,7 @@ async function prepareUpload(
       sha256: sha256Hex(content),
       content,
       commit,
+      inline: isObsidianConfigPath(input.path),
       onUploaded,
     },
   };
@@ -1031,7 +1190,7 @@ async function applyConflict(
     return uploadCurrent(plugin, ready, index, item, parent, encoding);
   }
   if (choice.action === "both" && item.remoteBytes) {
-    const copyPath = conflictCopyPath(plugin.app.vault, item.path, device, new Date());
+    const copyPath = await conflictCopyPath(plugin, item.path, device, new Date());
     await writeVaultFile(plugin.app.vault, copyPath, item.remoteBytes);
     new Notice(t("conflictCopy", { path: copyPath }));
     const parent = item.remote && remoteRev(item.remote) > 0 ? remoteRev(item.remote) : null;
@@ -1071,14 +1230,14 @@ async function uploadCurrent(
   parentRev: number | null,
   encoding: Encoding,
 ): Promise<"resolved" | PendingConflict | "unresolved"> {
-  const file = plugin.app.vault.getAbstractFileByPath(item.path);
-  if (!(file instanceof TFile)) return "unresolved";
-  const plain = new Uint8Array(await plugin.app.vault.readBinary(file));
+  const local = await readLocalFile(plugin, item.path);
+  if (!local) return "unresolved";
+  const { plain } = local;
   if (plain.byteLength > fileLimit(plugin)) return "unresolved";
   const mac = await fingerprint(ready, plain);
   try {
-    const result = await putFile(ready, item.fileId, item.path, plain, mac, encoding, file.stat.mtime, parentRev);
-    index[item.fileId] = syncedEntry(item.path, file.stat.mtime, file.stat.size, mac, encoding, result.rev);
+    const result = await putFile(ready, item.fileId, item.path, plain, mac, encoding, local.mtime, parentRev);
+    index[item.fileId] = syncedEntry(item.path, local.mtime, local.size, mac, encoding, result.rev);
     return "resolved";
   } catch (error) {
     if (!(error instanceof SyncConflictError)) throw error;
@@ -1105,14 +1264,37 @@ async function uploadFreshPath(
 }
 
 async function deleteVaultPath(plugin: InkwellPlugin, path: string): Promise<void> {
-  const file = plugin.app.vault.getAbstractFileByPath(path);
-  if (file instanceof TFile) await plugin.app.vault.delete(file);
+  await deleteLocalPath(plugin, path);
 }
 
 function fileStat(plugin: InkwellPlugin, path: string, fallbackMtime: number, fallbackSize: number): { mtime: number; size: number } {
   const file = plugin.app.vault.getAbstractFileByPath(path);
   if (file instanceof TFile) return { mtime: file.stat.mtime, size: file.stat.size };
   return { mtime: fallbackMtime, size: fallbackSize };
+}
+
+async function writeConfigFile(vault: Vault, path: string, data: Uint8Array): Promise<void> {
+  const adapter = vault.adapter;
+  const folders = path.split("/");
+  folders.pop();
+  let current = "";
+  for (const folder of folders) {
+    current = current ? `${current}/${folder}` : folder;
+    if (!(await adapter.exists(current))) {
+      try {
+        await adapter.mkdir(current);
+      } catch (error) {
+        if (!(await adapter.exists(current))) throw error;
+      }
+    }
+  }
+  if (await adapter.exists(path)) {
+    const stat = await adapter.stat(path);
+    if (stat && stat.type === "folder") throw new Error(t("folderConflict", { path }));
+  }
+  const copy = new Uint8Array(data.byteLength);
+  copy.set(data);
+  await adapter.writeBinary(path, copy.buffer);
 }
 
 function deviceLabel(): string {
@@ -1128,7 +1310,8 @@ function deviceLabel(): string {
   return (cleaned || "device").slice(0, 40);
 }
 
-function conflictCopyPath(vault: Vault, path: string, device: string, when: Date): string {
+async function conflictCopyPath(plugin: InkwellPlugin, path: string, device: string, when: Date): Promise<string> {
+  const vault = plugin.app.vault;
   const slash = path.lastIndexOf("/");
   const dir = slash >= 0 ? path.slice(0, slash + 1) : "";
   const base = slash >= 0 ? path.slice(slash + 1) : path;
@@ -1140,7 +1323,7 @@ function conflictCopyPath(vault: Vault, path: string, device: string, when: Date
   const label = `Conflicted copy ${device} ${stamp}`;
   let candidate = `${dir}${stem} (${label})${ext}`;
   let n = 2;
-  while (vault.getAbstractFileByPath(candidate)) {
+  while (await localFileExists(plugin, candidate)) {
     candidate = `${dir}${stem} (${label} ${n})${ext}`;
     n++;
   }
@@ -1160,7 +1343,7 @@ async function pullRemote(
   const stored = await ready.client.getObject(remoteFile.fileId, ready.vaultId);
   const path = safeVaultPath(new TextDecoder().decode(
     await openBytes(ready.keys?.encKey ?? null, stored.pathCipher, `path:${remoteFile.fileId}`),
-  ));
+  ), plugin.settings.obsidianConfig, plugin.app.vault.configDir || ".obsidian");
   if (!shouldSync(plugin, path)) return false;
   const data = await openBytes(ready.keys?.encKey ?? null, stored.contentCipher, `body:${remoteFile.fileId}`);
   await enqueue(async () => {
@@ -1188,7 +1371,12 @@ async function pullRemote(
 function shouldSync(plugin: InkwellPlugin, path: string): boolean {
   const normalized = path.replaceAll("\\", "/");
   if (PLUGIN_FILES.has(normalized)) return true;
-  if (!isSyncablePath(normalized)) return false;
+  const configDir = plugin.app.vault.configDir || ".obsidian";
+  if (obsidianConfigCategory(normalized, configDir)) {
+    if (!obsidianConfigEnabled(normalized, plugin.settings.obsidianConfig, configDir)) return false;
+    return !excludedPath(normalized, plugin.settings.excludePatterns ?? []);
+  }
+  if (!isSyncablePath(normalized, plugin.settings.obsidianConfig, configDir)) return false;
   if (excludedPath(normalized, plugin.settings.excludePatterns ?? [])) return false;
   return suffixSelected(normalized, plugin.settings.syncSuffixes, plugin.settings.syncOther, plugin.settings.customSuffixes);
 }
@@ -1253,7 +1441,7 @@ export async function restoreVault(
       const contentCipher = await client.fetchCipher(item.url);
       const path = safeVaultPath(new TextDecoder().decode(
         await openBytes(keys?.encKey ?? null, item.pathCipher, `path:${item.fileId}`),
-      ));
+      ), plugin.settings.obsidianConfig, plugin.app.vault.configDir || ".obsidian", true);
       const data = await openBytes(keys?.encKey ?? null, contentCipher, `body:${item.fileId}`);
       return { item, path, data };
     }, async (loaded) => {
@@ -1899,13 +2087,13 @@ interface NodeFs {
 
 declare function require(moduleName: string): NodeFs;
 
-function safeVaultPath(path: string): string {
+function safeVaultPath(path: string, obsidianConfig?: ObsidianConfigSettings, configDir = ".obsidian", allowDisabledConfig = false): string {
   const normalized = path.replaceAll("\\", "/").replace(/^\/+/, "");
   const parts = normalized.split("/");
   if (!normalized || parts.some((part) => !part || part === "." || part === "..")) {
     throw new Error(t("badBackupPath"));
   }
-  if (!isSyncablePath(normalized)) throw new Error(t("blockedPath", { path: normalized }));
+  if (!isSyncablePath(normalized, obsidianConfig, configDir, allowDisabledConfig)) throw new Error(t("blockedPath", { path: normalized }));
   return normalized;
 }
 
@@ -1922,6 +2110,11 @@ function stampMtime(plugin: InkwellPlugin, path: string, mtime: number): void {
 }
 
 async function writeVaultFile(vault: Vault, path: string, data: Uint8Array): Promise<void> {
+  const configDir = vault.configDir || ".obsidian";
+  if (isConfigDirPath(path, configDir)) {
+    await writeConfigFile(vault, path, data);
+    return;
+  }
   const folders = path.split("/");
   folders.pop();
   let current = "";

@@ -12,6 +12,7 @@ import { resolveStoredServerChoice, type ServerKind } from "./server-mode";
 import { promptBind } from "./bind-prompt";
 import { hasActiveBinding } from "./binding";
 import { allSuffixes } from "./file-kinds";
+import { DEFAULT_OBSIDIAN_CONFIG, normalizeObsidianConfig, type ObsidianConfigSettings } from "./obsidian-config";
 import { FileHistoryModal } from "./history";
 import { InkwellSettingTab } from "./settings";
 import { formatLiveStatus, normalizeSyncMode, passForPull, passForSync, shouldNoticePendingPull, showsPullCommand, statusBarActivatesPull, type SyncMode } from "./sync-mode";
@@ -87,6 +88,8 @@ export interface SyncSettings {
   syncSuffixes: string[];
   customSuffixes: string[];
   syncOther: boolean;
+  /** Selected Obsidian config-folder categories. Small files are stored inline. */
+  obsidianConfig: ObsidianConfigSettings;
   lastSyncAt: number | null;
   lastSyncSummary: string;
   gitignorePrompted: boolean;
@@ -130,6 +133,7 @@ const DEFAULT_SETTINGS: SyncSettings = {
   syncSuffixes: allSuffixes(),
   customSuffixes: [],
   syncOther: true,
+  obsidianConfig: { ...DEFAULT_OBSIDIAN_CONFIG },
   lastSyncAt: null,
   lastSyncSummary: "",
   gitignorePrompted: false,
@@ -226,7 +230,7 @@ export default class InkwellPlugin extends Plugin {
           break;
         }
         this.dirtyPaths.delete(oldPath);
-        if (isSyncablePath(file.path)) this.dirtyPaths.add(file.path);
+        if (isSyncablePath(file.path, this.settings.obsidianConfig)) this.dirtyPaths.add(file.path);
         void this.saveSettings();
       }
       this.refreshLiveStatus();
@@ -234,7 +238,7 @@ export default class InkwellPlugin extends Plugin {
     this.registerEvent(this.app.workspace.on("file-open", () => this.refreshLiveStatus()));
     this.registerEvent(this.app.workspace.on("editor-change", () => {
       const file = this.app.workspace.getActiveFile();
-      if (file && isSyncablePath(file.path)) this.dirtyPaths.add(file.path);
+      if (file && isSyncablePath(file.path, this.settings.obsidianConfig)) this.dirtyPaths.add(file.path);
       this.refreshLiveStatus();
     }));
     this.register(() => {
@@ -309,6 +313,7 @@ export default class InkwellPlugin extends Plugin {
       ? storedSuffixes.filter((item): item is string => typeof item === "string" && allowed.has(item))
       : allSuffixes();
     if (typeof rest.syncOther !== "boolean") this.settings.syncOther = true;
+    this.settings.obsidianConfig = normalizeObsidianConfig(rest.obsidianConfig);
     this.settings.index ??= {};
     const storedCursor = rest.changeCursor;
     this.settings.changeCursor = typeof storedCursor === "number" && Number.isSafeInteger(storedCursor) && storedCursor >= 0
@@ -609,7 +614,7 @@ export default class InkwellPlugin extends Plugin {
     for (const entry of Object.values(this.settings.index)) {
       if (entry.path) byPath.set(entry.path, entry);
     }
-    const files = this.app.vault.getFiles().filter((file) => isSyncablePath(file.path));
+    const files = this.app.vault.getFiles().filter((file) => isSyncablePath(file.path, this.settings.obsidianConfig));
     let pending = 0;
     let synced = 0;
     for (const file of files) {
@@ -618,7 +623,7 @@ export default class InkwellPlugin extends Plugin {
     }
     const active = this.app.workspace.getActiveFile();
     let current = "";
-    if (active && isSyncablePath(active.path)) {
+    if (active && isSyncablePath(active.path, this.settings.obsidianConfig)) {
       const entry = byPath.get(active.path);
       if (this.isPending(active.path, active.stat.mtime, active.stat.size, entry)) {
         current = ` · ${t("thisPending")}`;

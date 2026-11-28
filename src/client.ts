@@ -87,6 +87,8 @@ export interface BatchUploadRequest {
   sha256: string;
   content: string;
   commit: Record<string, unknown>;
+  /** Keep small config files in the server database instead of object storage. */
+  inline?: boolean;
   onUploaded?: () => void;
 }
 
@@ -128,13 +130,14 @@ export class SyncClient {
       historyKind?: VersionKind;
       patchCipher?: PayloadCipher;
     },
+    inline = false,
   ): Promise<PutResult & { versionId?: string; historyKind?: VersionKind; flush?: FlushWindow }> {
     const content = JSON.stringify(payload.contentCipher);
     const bytes = new TextEncoder().encode(content).byteLength;
     const parentRev = payload.parentRev ?? null;
     const perfStarted = Date.now();
     const listed = await this.urlList(payload.vaultId || payload.vault, {
-      uploads: [{ fileId, parentRev, bytes, sha256: sha256Hex(content) }],
+      uploads: [{ fileId, parentRev, bytes, sha256: sha256Hex(content), inline }],
     });
     const urlMs = Date.now() - perfStarted;
     const conflict = listed.conflicts.find((item) => item.fileId === fileId);
@@ -200,6 +203,7 @@ export class SyncClient {
         parentRev: item.parentRev,
         bytes: item.bytes,
         sha256: item.sha256,
+        inline: item.inline === true,
       })),
     });
     const conflicts = new Map(listed.conflicts.map((item) => [item.fileId, item]));
@@ -373,7 +377,7 @@ export class SyncClient {
     return this.authed("POST", `/api/v1/trash/${fileId}/restore`, { vaultId });
   }
 
-  urlList(vault: string, query: { downloads?: string[]; uploads?: { fileId: string; parentRev?: number | null; bytes: number; sha256?: string }[] }): Promise<UrlListResponse> {
+  urlList(vault: string, query: { downloads?: string[]; uploads?: { fileId: string; parentRev?: number | null; bytes: number; sha256?: string; inline?: boolean }[] }): Promise<UrlListResponse> {
     return this.authed<UrlListResponse>("POST", "/api/v1/urls", {
       vault,
       downloads: query.downloads ?? [],
