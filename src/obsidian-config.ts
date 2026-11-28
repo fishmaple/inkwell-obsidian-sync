@@ -49,6 +49,7 @@ const TOP_LEVEL: Record<string, ObsidianConfigCategory> = {
   "app.json": "app",
   "appearance.json": "app",
   "core-plugins.json": "pluginSwitches",
+  "core-plugins-migration.json": "pluginSwitches",
   "community-plugins.json": "pluginSwitches",
   "hotkeys.json": "hotkeys",
   "workspace.json": "workspace",
